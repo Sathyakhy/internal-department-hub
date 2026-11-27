@@ -1,4 +1,5 @@
 import { supabase } from '../integrations/supabase/client';
+import type { Json } from '../integrations/supabase/types';
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { DEFAULT_CERT_BG, LEGACY_DEFAULT_CERT_BG, SEED_STATE } from '../data/seedData';
 import {
@@ -29,10 +30,129 @@ import { getRowField, parseBooleanCell } from '../utils/excel';
 import { canEditModule, canViewModule, getEffectivePermission } from '../utils/rbac';
 
 const STORAGE_KEY = 'department_os_state_v2';
+const CLOUD_MIGRATION_KEY = 'department_os_cloud_migrated_project';
+
+export type CloudSyncStatus = 'connecting' | 'synced' | 'error' | 'offline';
 
 const clone = <T,>(val: T): T => JSON.parse(JSON.stringify(val));
 
 const uid = (prefix: string) => `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+
+function hasCustomWorkspaceData(candidate: Partial<AppState> | null | undefined): boolean {
+  if (!candidate) return false;
+  if ((candidate.courses?.length ?? 0) > 0) return true;
+  if ((candidate.enrollments?.length ?? 0) > 0) return true;
+  if ((candidate.projects?.length ?? 0) > 0) return true;
+  if ((candidate.tasks?.length ?? 0) > 0) return true;
+  if ((candidate.positions?.length ?? 0) > 0) return true;
+  if ((candidate.announcements?.length ?? 0) > 0) return true;
+  if ((candidate.customers?.length ?? 0) > 0) return true;
+  if ((candidate.vendors?.length ?? 0) > 0) return true;
+  if ((candidate.products?.length ?? 0) > 0) return true;
+  if ((candidate.onboardingItems?.length ?? 0) > 0) return true;
+  if ((candidate.projectUpdates?.length ?? 0) > 0) return true;
+  if ((candidate.filterPresets?.length ?? 0) > 0) return true;
+  if ((candidate.auditLogs?.length ?? 0) > 0) return true;
+  if ((candidate.users?.length ?? 0) > 1) return true;
+  if (candidate.roles && candidate.roles.length !== SEED_STATE.roles.length) return true;
+  if (candidate.branding?.logoUrl) return true;
+  if (candidate.branding?.appName && candidate.branding.appName !== SEED_STATE.branding.appName) return true;
+  if (candidate.branding?.tagline && candidate.branding.tagline !== SEED_STATE.branding.tagline) return true;
+  if (
+    candidate.branding?.defaultCertificateBg &&
+    candidate.branding.defaultCertificateBg !== DEFAULT_CERT_BG &&
+    candidate.branding.defaultCertificateBg !== LEGACY_DEFAULT_CERT_BG
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function mergeById<T extends { id: string }>(primary: T[] = [], secondary: T[] = []): T[] {
+  const seen = new Set(primary.map((item) => item.id));
+  const merged = [...primary];
+  for (const item of secondary) {
+    if (!seen.has(item.id)) {
+      seen.add(item.id);
+      merged.push(item);
+    }
+  }
+  return merged;
+}
+
+function buildHydratedState(prev: AppState, incoming: Partial<AppState>): AppState {
+  const savedCertBg = incoming.branding?.defaultCertificateBg;
+  const upgradedCertBg =
+    !savedCertBg || savedCertBg === LEGACY_DEFAULT_CERT_BG ? DEFAULT_CERT_BG : savedCertBg;
+  const nextUsers = incoming.users && incoming.users.length > 0 ? incoming.users : prev.users;
+  const validCurrentUserId = nextUsers.some((u) => u.id === prev.currentUserId)
+    ? prev.currentUserId
+    : nextUsers[0]?.id ?? prev.currentUserId;
+
+  return {
+    ...clone(SEED_STATE),
+    ...prev,
+    ...incoming,
+    branding: {
+      ...SEED_STATE.branding,
+      ...prev.branding,
+      ...(incoming.branding ?? {}),
+      defaultCertificateBg: upgradedCertBg,
+    },
+    users: nextUsers,
+    isAuthenticated: prev.isAuthenticated,
+    currentUserId: validCurrentUserId,
+  };
+}
+
+function mergeWorkspaceStates(local: AppState, remote: Partial<AppState>): AppState {
+  const mergedBranding: BrandingSettings = {
+    ...SEED_STATE.branding,
+    ...(remote.branding ?? {}),
+    ...local.branding,
+    logoUrl: local.branding.logoUrl || remote.branding?.logoUrl || '',
+    defaultCertificateBg:
+      local.branding.defaultCertificateBg && local.branding.defaultCertificateBg !== LEGACY_DEFAULT_CERT_BG
+        ? local.branding.defaultCertificateBg
+        : remote.branding?.defaultCertificateBg && remote.branding.defaultCertificateBg !== LEGACY_DEFAULT_CERT_BG
+          ? remote.branding.defaultCertificateBg
+          : DEFAULT_CERT_BG,
+  };
+
+  const mergedUsers = mergeById(local.users, remote.users);
+  const validCurrentUserId = mergedUsers.some((u) => u.id === local.currentUserId)
+    ? local.currentUserId
+    : mergedUsers[0]?.id ?? local.currentUserId;
+
+  return {
+    ...clone(SEED_STATE),
+    ...remote,
+    ...local,
+    branding: mergedBranding,
+    roles: mergeById(local.roles, remote.roles),
+    positions: mergeById(local.positions, remote.positions),
+    users: mergedUsers,
+    onboardingItems: mergeById(local.onboardingItems, remote.onboardingItems),
+    announcements: mergeById(local.announcements, remote.announcements),
+    customers: mergeById(local.customers, remote.customers),
+    vendors: mergeById(local.vendors, remote.vendors),
+    products: mergeById(local.products, remote.products),
+    projects: mergeById(local.projects, remote.projects),
+    tasks: mergeById(local.tasks, remote.tasks),
+    projectUpdates: mergeById(local.projectUpdates, remote.projectUpdates),
+    filterPresets: mergeById(local.filterPresets, remote.filterPresets),
+    courses: mergeById(local.courses, remote.courses),
+    enrollments: mergeById(local.enrollments, remote.enrollments),
+    auditLogs: mergeById(local.auditLogs, remote.auditLogs),
+    isAuthenticated: local.isAuthenticated,
+    currentUserId: validCurrentUserId,
+  };
+}
+
+function serializeForCloud(s: AppState): Json {
+  const { isAuthenticated: _ignoredAuth, ...rest } = s;
+  return rest as unknown as Json;
+}
 
 function loadInitialState(): AppState {
   try {
@@ -62,6 +182,10 @@ interface AppContextValue {
   toasts: ToastMessage[];
   dismissToast: (id: string) => void;
   notify: (title: string, type?: ToastMessage['type']) => void;
+  cloudStatus: CloudSyncStatus;
+  lastCloudSyncAt: string | null;
+  pushLocalToCloud: () => Promise<boolean>;
+  pullCloudToLocal: () => Promise<boolean>;
   getPerm: (moduleId: ModuleId) => PermissionLevel;
   canView: (moduleId: ModuleId) => boolean;
   canEdit: (moduleId: ModuleId) => boolean;
@@ -165,31 +289,196 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
-  // Cloud sync: load shared workspace once, then save changes (debounced)
+  const [cloudStatus, setCloudStatus] = useState<CloudSyncStatus>(() =>
+    supabase ? 'connecting' : 'offline'
+  );
+  const [lastCloudSyncAt, setLastCloudSyncAt] = useState<string | null>(null);
+
+  const stateRef = useRef(state);
+  stateRef.current = state;
+
+  // Cloud sync: safely migrate local data on first connect, or hydrate from shared workspace_state
   const cloudReady = useRef(false);
+  const skipNextCloudSave = useRef(false);
+
   useEffect(() => {
+    if (!supabase) {
+      setCloudStatus('offline');
+      return;
+    }
+
     let cancelled = false;
     (async () => {
-      const { data } = await supabase.from('workspace_state').select('data').eq('id', 'main').maybeSingle();
-      if (cancelled) return;
-      if (data?.data && Object.keys(data.data as object).length) {
-        const remote = data.data as Partial<AppState>;
-        setState((prev) => ({ ...prev, ...remote, isAuthenticated: prev.isAuthenticated, currentUserId: prev.currentUserId } as AppState));
+      try {
+        const { data, error } = await supabase
+          .from('workspace_state')
+          .select('data, updated_at')
+          .eq('id', 'main')
+          .maybeSingle();
+
+        if (cancelled) return;
+        if (error) {
+          console.error('Cloud load failed', error);
+          setCloudStatus('error');
+          return;
+        }
+
+        const localSnapshot = stateRef.current;
+        const remoteData = (data?.data ?? null) as Partial<AppState> | null;
+        const remoteHasData = hasCustomWorkspaceData(remoteData);
+        const localHasData = hasCustomWorkspaceData(localSnapshot);
+        const projectId = (import.meta.env.VITE_SUPABASE_PROJECT_ID as string | undefined) || 'default';
+        const alreadyMigrated = localStorage.getItem(CLOUD_MIGRATION_KEY) === projectId;
+
+        if (localHasData && !remoteHasData) {
+          const nowIso = new Date().toISOString();
+          const { error: upsertError } = await supabase.from('workspace_state').upsert({
+            id: 'main',
+            data: serializeForCloud(localSnapshot),
+            updated_at: nowIso,
+          });
+          if (cancelled) return;
+          if (upsertError) {
+            console.error('Cloud migration upsert failed', upsertError);
+            setCloudStatus('error');
+          } else {
+            localStorage.setItem(CLOUD_MIGRATION_KEY, projectId);
+            setLastCloudSyncAt(nowIso);
+            setCloudStatus('synced');
+            notify('Migrated local workspace data to cloud database');
+          }
+        } else if (localHasData && remoteHasData && !alreadyMigrated && remoteData) {
+          const merged = mergeWorkspaceStates(localSnapshot, remoteData);
+          const nowIso = new Date().toISOString();
+          skipNextCloudSave.current = true;
+          setState(merged);
+          const { error: upsertError } = await supabase.from('workspace_state').upsert({
+            id: 'main',
+            data: serializeForCloud(merged),
+            updated_at: nowIso,
+          });
+          if (cancelled) return;
+          if (upsertError) {
+            console.error('Cloud merge upsert failed', upsertError);
+            setCloudStatus('error');
+          } else {
+            localStorage.setItem(CLOUD_MIGRATION_KEY, projectId);
+            setLastCloudSyncAt(nowIso);
+            setCloudStatus('synced');
+            notify('Merged and synced workspace data with cloud database');
+          }
+        } else if (remoteHasData && remoteData) {
+          skipNextCloudSave.current = true;
+          setState((prev) => buildHydratedState(prev, remoteData));
+          localStorage.setItem(CLOUD_MIGRATION_KEY, projectId);
+          setLastCloudSyncAt(data?.updated_at ?? new Date().toISOString());
+          setCloudStatus('synced');
+        } else {
+          localStorage.setItem(CLOUD_MIGRATION_KEY, projectId);
+          setLastCloudSyncAt(data?.updated_at ?? null);
+          setCloudStatus('synced');
+        }
+
+        cloudReady.current = true;
+      } catch (err) {
+        if (cancelled) return;
+        console.error('Unexpected cloud sync error', err);
+        setCloudStatus('error');
       }
-      cloudReady.current = true;
     })();
-    return () => { cancelled = true; };
-  }, []);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [notify]);
+
   useEffect(() => {
-    if (!cloudReady.current) return;
+    const client = supabase;
+    if (!client || !cloudReady.current) return;
+    if (skipNextCloudSave.current) {
+      skipNextCloudSave.current = false;
+      return;
+    }
+
     const t = setTimeout(() => {
-      const { isAuthenticated, ...rest } = state as any;
-      supabase.from('workspace_state').upsert({ id: 'main', data: rest, updated_at: new Date().toISOString() }).then(({ error }) => {
-        if (error) console.error('Cloud save failed', error);
-      });
+      const nowIso = new Date().toISOString();
+      client
+        .from('workspace_state')
+        .upsert({ id: 'main', data: serializeForCloud(state), updated_at: nowIso })
+        .then(({ error }) => {
+          if (error) {
+            console.error('Cloud save failed', error);
+            setCloudStatus('error');
+          } else {
+            setLastCloudSyncAt(nowIso);
+            setCloudStatus('synced');
+          }
+        });
     }, 800);
+
     return () => clearTimeout(t);
   }, [state]);
+
+  const pushLocalToCloud = useCallback(async (): Promise<boolean> => {
+    if (!supabase) {
+      notify('Cloud database is not configured.', 'error');
+      return false;
+    }
+    setCloudStatus('connecting');
+    const nowIso = new Date().toISOString();
+    const { error } = await supabase.from('workspace_state').upsert({
+      id: 'main',
+      data: serializeForCloud(stateRef.current),
+      updated_at: nowIso,
+    });
+    if (error) {
+      console.error('Manual cloud push failed', error);
+      setCloudStatus('error');
+      notify('Failed to push local data to database.', 'error');
+      return false;
+    }
+    const projectId = (import.meta.env.VITE_SUPABASE_PROJECT_ID as string | undefined) || 'default';
+    localStorage.setItem(CLOUD_MIGRATION_KEY, projectId);
+    cloudReady.current = true;
+    setLastCloudSyncAt(nowIso);
+    setCloudStatus('synced');
+    notify('Workspace data migrated to cloud database');
+    return true;
+  }, [notify]);
+
+  const pullCloudToLocal = useCallback(async (): Promise<boolean> => {
+    if (!supabase) {
+      notify('Cloud database is not configured.', 'error');
+      return false;
+    }
+    setCloudStatus('connecting');
+    const { data, error } = await supabase
+      .from('workspace_state')
+      .select('data, updated_at')
+      .eq('id', 'main')
+      .maybeSingle();
+
+    if (error) {
+      console.error('Manual cloud pull failed', error);
+      setCloudStatus('error');
+      notify('Failed to load workspace data from database.', 'error');
+      return false;
+    }
+    const remoteData = (data?.data ?? null) as Partial<AppState> | null;
+    if (!remoteData || Object.keys(remoteData).length === 0) {
+      setCloudStatus('synced');
+      notify('No saved workspace data found in cloud database yet.', 'info');
+      return false;
+    }
+
+    skipNextCloudSave.current = true;
+    setState((prev) => buildHydratedState(prev, remoteData));
+    cloudReady.current = true;
+    setLastCloudSyncAt(data?.updated_at ?? new Date().toISOString());
+    setCloudStatus('synced');
+    notify('Loaded workspace data from cloud database');
+    return true;
+  }, [notify]);
 
   // Persist to localStorage
   useEffect(() => {
@@ -2308,6 +2597,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     toasts,
     dismissToast,
     notify,
+    cloudStatus,
+    lastCloudSyncAt,
+    pushLocalToCloud,
+    pullCloudToLocal,
     getPerm,
     canView,
     canEdit,
