@@ -91,3 +91,11 @@
     z-index: 99999 !important;
   }
 }
+
+#lovable-badge {
+  display: none !important;
+  visibility: hidden !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
