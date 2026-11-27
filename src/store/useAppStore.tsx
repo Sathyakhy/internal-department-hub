@@ -485,9 +485,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
     } catch {
-      notify('Browser storage limit reached — use smaller files so your updates persist.', 'warning');
+      if (cloudStatus !== 'synced') {
+        notify('Browser storage limit reached — use smaller files so your updates persist.', 'warning');
+      }
     }
-  }, [state, notify]);
+  }, [state, notify, cloudStatus]);
 
   // Sync Tailwind dark class
   useEffect(() => {
