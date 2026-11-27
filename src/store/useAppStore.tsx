@@ -306,6 +306,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Cloud sync: safely migrate local data on first connect, or hydrate from shared workspace_state
   const cloudReady = useRef(false);
   const skipNextCloudSave = useRef(false);
+  const pendingSave = useRef(false);
+  const remoteUpdatedAt = useRef<string | null>(null);
 
   useEffect(() => {
     if (!supabase) {
@@ -416,14 +418,70 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             console.error('Cloud save failed', error);
             setCloudStatus('error');
           } else {
+            pendingSave.current = false;
             setLastCloudSyncAt(nowIso);
             setCloudStatus('synced');
           }
         });
     }, 800);
 
+    pendingSave.current = true;
     return () => clearTimeout(t);
   }, [state]);
+
+  // Flush pending save immediately when leaving/hiding the page
+  useEffect(() => {
+    if (lastCloudSyncAt) remoteUpdatedAt.current = lastCloudSyncAt;
+  }, [lastCloudSyncAt]);
+
+  useEffect(() => {
+    const client = supabase;
+    if (!client) return;
+    const flush = () => {
+      if (!pendingSave.current || !cloudReady.current) return;
+      pendingSave.current = false;
+      const nowIso = new Date().toISOString();
+      client
+        .from('workspace_state')
+        .upsert({ id: 'main', data: serializeForCloud(stateRef.current), updated_at: nowIso })
+        .then(({ error }) => {
+          if (error) { pendingSave.current = true; console.error('Cloud flush failed', error); }
+          else setLastCloudSyncAt(nowIso);
+        });
+    };
+    // Pull newer data saved from other devices/tabs
+    const refresh = async () => {
+      if (!cloudReady.current || pendingSave.current) return;
+      const { data, error } = await client
+        .from('workspace_state')
+        .select('data, updated_at')
+        .eq('id', 'main')
+        .maybeSingle();
+      if (error || !data || pendingSave.current) return;
+      const remoteTs = data.updated_at ? new Date(data.updated_at).getTime() : 0;
+      const localTs = remoteUpdatedAt.current ? new Date(remoteUpdatedAt.current).getTime() : 0;
+      if (remoteTs > localTs + 1 && hasCustomWorkspaceData(data.data as Partial<AppState>)) {
+        skipNextCloudSave.current = true;
+        setState((prev) => buildHydratedState(prev, data.data as Partial<AppState>));
+        setLastCloudSyncAt(data.updated_at);
+        setCloudStatus('synced');
+      }
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') flush();
+      else refresh();
+    };
+    window.addEventListener('beforeunload', flush);
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('focus', refresh);
+    const interval = setInterval(refresh, 15000);
+    return () => {
+      window.removeEventListener('beforeunload', flush);
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('focus', refresh);
+      clearInterval(interval);
+    };
+  }, []);
 
   const pushLocalToCloud = useCallback(async (): Promise<boolean> => {
     if (!supabase) {
