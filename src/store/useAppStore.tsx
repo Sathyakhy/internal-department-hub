@@ -1,4 +1,5 @@
-import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import { supabase } from '../integrations/supabase/client';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { DEFAULT_CERT_BG, LEGACY_DEFAULT_CERT_BG, SEED_STATE } from '../data/seedData';
 import {
   Announcement,
@@ -163,6 +164,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const dismissToast = useCallback((id: string) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
+
+  // Cloud sync: load shared workspace once, then save changes (debounced)
+  const cloudReady = useRef(false);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const { data } = await supabase.from('workspace_state').select('data').eq('id', 'main').maybeSingle();
+      if (cancelled) return;
+      if (data?.data && Object.keys(data.data as object).length) {
+        const remote = data.data as Partial<AppState>;
+        setState((prev) => ({ ...prev, ...remote, isAuthenticated: prev.isAuthenticated, currentUserId: prev.currentUserId } as AppState));
+      }
+      cloudReady.current = true;
+    })();
+    return () => { cancelled = true; };
+  }, []);
+  useEffect(() => {
+    if (!cloudReady.current) return;
+    const t = setTimeout(() => {
+      const { isAuthenticated, ...rest } = state as any;
+      supabase.from('workspace_state').upsert({ id: 'main', data: rest, updated_at: new Date().toISOString() }).then(({ error }) => {
+        if (error) console.error('Cloud save failed', error);
+      });
+    }, 800);
+    return () => clearTimeout(t);
+  }, [state]);
 
   // Persist to localStorage
   useEffect(() => {
