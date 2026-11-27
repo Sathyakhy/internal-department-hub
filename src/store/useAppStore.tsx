@@ -280,7 +280,46 @@ interface AppContextValue {
 const AppStoreContext = createContext<AppContextValue | null>(null);
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [state, setState] = useState<AppState>(loadInitialState);
+  const [rawState, setRawState] = useState<AppState>(loadInitialState);
+  const state = useMemo<AppState>(() => {
+    const needsFix = (rawState.projects ?? []).some(
+      (p) => !Array.isArray(p.pms) || !Array.isArray(p.memberIds) || !Array.isArray(p.visibleColumns)
+    );
+    const statusMap: Record<string, Task['status']> = { 'in progress': 'in progress', done: 'done', todo: 'todo', blocked: 'blocked' };
+    const tasksNeedFix = (rawState.tasks ?? []).some(
+      (t) => !Array.isArray(t.predecessorIds) || !Array.isArray(t.attachments) || !(t.status in statusMap)
+    );
+    if (!needsFix && !tasksNeedFix && Array.isArray(rawState.projects)) return rawState;
+    const projStatus = (s: string): Project['status'] =>
+      (['Planning', 'Active', 'On Hold', 'Completed'] as string[]).includes(s) ? (s as Project['status']) : s === 'Done' ? 'Completed' : 'Active';
+    return {
+      ...rawState,
+      projects: (rawState.projects ?? []).map((p) => ({
+        ...p,
+        pms: Array.isArray(p.pms) ? p.pms : [],
+        memberIds: Array.isArray(p.memberIds) ? p.memberIds : [],
+        visibleColumns: Array.isArray(p.visibleColumns)
+          ? p.visibleColumns
+          : ['status', 'priority', 'assignee', 'startDate', 'dueDate', 'dependencies', 'attachments'],
+        status: projStatus(String(p.status ?? '')),
+        ownerId: p.ownerId ?? (p as unknown as { managerId?: string }).managerId ?? '',
+        archived: Boolean(p.archived),
+        isTemplate: Boolean(p.isTemplate),
+      })),
+      tasks: (rawState.tasks ?? []).map((t) => {
+        const legacy = t as unknown as { dependencies?: string[] };
+        return {
+          ...t,
+          parentId: t.parentId ?? null,
+          predecessorIds: Array.isArray(t.predecessorIds) ? t.predecessorIds : legacy.dependencies ?? [],
+          attachments: Array.isArray(t.attachments) ? t.attachments : [],
+          status: statusMap[String(t.status ?? '').toLowerCase()] ?? 'todo',
+          order: typeof t.order === 'number' ? t.order : 0,
+        };
+      }),
+    };
+  }, [rawState]);
+  const setState = setRawState;
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
 
   const notify = useCallback((title: string, type: ToastMessage['type'] = 'success') => {
