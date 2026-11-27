@@ -1,0 +1,8 @@
+{
+  "name": "Department OS",
+  "description": "Unified internal workspace platform consolidating staff onboarding, recursive project management, LMS certification, interactive org charts, announcements, and RBAC administration.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
