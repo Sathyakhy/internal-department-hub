@@ -155,25 +155,7 @@ function serializeForCloud(s: AppState): Json {
 }
 
 function loadInitialState(): AppState {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return clone(SEED_STATE);
-    const parsed = JSON.parse(raw) as Partial<AppState>;
-    const savedCertBg = parsed.branding?.defaultCertificateBg;
-    const upgradedCertBg =
-      !savedCertBg || savedCertBg === LEGACY_DEFAULT_CERT_BG ? DEFAULT_CERT_BG : savedCertBg;
-    return {
-      ...clone(SEED_STATE),
-      ...parsed,
-      branding: {
-        ...SEED_STATE.branding,
-        ...(parsed.branding ?? {}),
-        defaultCertificateBg: upgradedCertBg,
-      },
-    };
-  } catch {
-    return clone(SEED_STATE);
-  }
+  return clone(SEED_STATE);
 }
 
 interface AppContextValue {
@@ -480,16 +462,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return true;
   }, [notify]);
 
-  // Persist to localStorage
-  useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-    } catch {
-      if (cloudStatus !== 'synced') {
-        notify('Browser storage limit reached — use smaller files so your updates persist.', 'warning');
-      }
-    }
-  }, [state, notify, cloudStatus]);
+
 
   // Sync Tailwind dark class
   useEffect(() => {
@@ -612,12 +585,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }));
   }, []);
 
-  const resetDemoData = useCallback(() => {
+  const resetDemoData = useCallback(async () => {
     const fresh = clone(SEED_STATE);
     fresh.isAuthenticated = true;
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(fresh));
     setState(fresh);
-    notify('Demo data restored to defaults', 'info');
+    if (supabase) {
+      const nowIso = new Date().toISOString();
+      await supabase.from('workspace_state').upsert({
+        id: 'main',
+        data: serializeForCloud(fresh),
+        updated_at: nowIso,
+      });
+    }
+    notify('Demo data restored to Supabase database defaults', 'info');
   }, [notify]);
 
   // Roles
