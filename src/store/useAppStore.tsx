@@ -150,8 +150,32 @@ function mergeWorkspaceStates(local: AppState, remote: Partial<AppState>): AppSt
 }
 
 function serializeForCloud(s: AppState): Json {
-  const { isAuthenticated: _ignoredAuth, ...rest } = s;
-  return rest as unknown as Json;
+  const { isAuthenticated: _ignoredAuth, auditLogs, ...rest } = s;
+  const trimmedAudits = (auditLogs ?? []).slice(0, 40).map((log) => ({
+    ...log,
+    before: log.before
+      ? JSON.parse(
+          JSON.stringify(log.before, (k, v) =>
+            typeof v === 'string' && v.startsWith('data:') && v.length > 300
+              ? '[TRUNCATED_MEDIA]'
+              : v
+          )
+        )
+      : null,
+    after: log.after
+      ? JSON.parse(
+          JSON.stringify(log.after, (k, v) =>
+            typeof v === 'string' && v.startsWith('data:') && v.length > 300
+              ? '[TRUNCATED_MEDIA]'
+              : v
+          )
+        )
+      : null,
+  }));
+  return {
+    ...rest,
+    auditLogs: trimmedAudits,
+  } as unknown as Json;
 }
 
 function loadInitialState(): AppState {
