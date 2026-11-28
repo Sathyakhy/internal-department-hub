@@ -2,9 +2,17 @@ import React, { useState } from 'react';
 import { ArrowRight, Eye, EyeOff, Lock, Mail, Moon, Sun } from 'lucide-react';
 import { useAppStore } from '../../store/useAppStore';
 
+const LAST_LOGIN_EMAIL_KEY = 'department_os_last_login_email';
+
 export const LoginScreen: React.FC = () => {
   const { state, login, toggleTheme } = useAppStore();
-  const [email, setEmail] = useState('');
+  const [email, setEmail] = useState(() => {
+    try {
+      return localStorage.getItem(LAST_LOGIN_EMAIL_KEY) ?? '';
+    } catch {
+      return '';
+    }
+  });
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
@@ -13,7 +21,13 @@ export const LoginScreen: React.FC = () => {
     e.preventDefault();
     setError('');
     const ok = login(email, password);
-    if (!ok) {
+    if (ok) {
+      try {
+        localStorage.setItem(LAST_LOGIN_EMAIL_KEY, email.trim());
+      } catch {
+        // Ignore storage quota / privacy mode restrictions
+      }
+    } else {
       setError('Invalid email, password, or inactive account.');
     }
   };

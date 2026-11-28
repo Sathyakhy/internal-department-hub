@@ -23,7 +23,7 @@ import { StaffDirectoryView } from './components/modules/StaffDirectoryView';
 import { TaskDetailDrawer } from './components/modules/TaskDetailDrawer';
 
 const WorkspaceShell: React.FC = () => {
-  const { state, currentUser, canView } = useAppStore();
+  const { state, currentUser, canView, isCloudHydrating } = useAppStore();
 
   const [activeModule, setActiveModule] = useState<ModuleId>('dashboard');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -36,6 +36,20 @@ const WorkspaceShell: React.FC = () => {
       setActiveModule(firstPermitted);
     }
   }, [currentUser.id, state.roles, activeModule, canView]);
+
+  if (isCloudHydrating) {
+    return (
+      <div className="min-h-screen bg-neutral-50 dark:bg-black flex items-center justify-center p-6">
+        <div className="flex flex-col items-center gap-3 text-center">
+          <div className="h-8 w-8 rounded-full border-2 border-neutral-200 dark:border-zinc-800 border-t-sky-600 animate-spin" />
+          <p className="text-xs font-medium text-neutral-600 dark:text-neutral-400">
+            Loading workspace data...
+          </p>
+        </div>
+        <ToastContainer />
+      </div>
+    );
+  }
 
   if (!state.isAuthenticated) {
     return (

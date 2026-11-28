@@ -12,12 +12,21 @@ import {
   ExternalLink,
   FileText,
   Lock,
+  Maximize2,
+  Minimize2,
+  PanelLeftClose,
+  PanelLeftOpen,
   Play,
   Plus,
   Printer,
+  RotateCcw,
+  Search,
   Trash2,
   Upload,
+  Users,
   X,
+  ZoomIn,
+  ZoomOut,
 } from 'lucide-react';
 import { useAppStore } from '../../store/useAppStore';
 import {
@@ -29,36 +38,14 @@ import {
   QuizQuestion,
 } from '../../types';
 import { downloadCsv } from '../../utils/rbac';
+import { sanitizeLessonHtml, stripHtmlToText } from '../../utils/sanitizeHtml';
 import { ImageUploadField } from '../common/ImageUploadField';
+import { RichTextLessonEditor } from '../common/RichTextLessonEditor';
 import { UserAvatar } from '../common/UserAvatar';
 
 type LmsTab = 'catalog' | 'builder' | 'reporting';
 
-const slugifyFilename = (value: string): string =>
-  value
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-|-$/g, '');
-
-const inferExtensionFromMime = (mime: string, fallback: string): string => {
-  const normalized = mime.toLowerCase().split(';')[0].trim();
-  const map: Record<string, string> = {
-    'application/pdf': 'pdf',
-    'image/png': 'png',
-    'image/jpeg': 'jpg',
-    'image/jpg': 'jpg',
-    'image/webp': 'webp',
-    'image/gif': 'gif',
-    'image/svg+xml': 'svg',
-    'video/mp4': 'mp4',
-    'video/webm': 'webm',
-    'video/quicktime': 'mov',
-    'text/plain': 'txt',
-    'text/markdown': 'md',
-    'application/zip': 'zip',
-  };
-  return map[normalized] || fallback;
-};
+const MAX_LESSON_FILE_BYTES = 1_500_000;
 
 const dataUrlToBlob = (dataUrl: string): { blob: Blob; mimeType: string } => {
   const commaIdx = dataUrl.indexOf(',');
@@ -82,17 +69,6 @@ const dataUrlToBlob = (dataUrl: string): { blob: Blob; mimeType: string } => {
   return { blob: new Blob([decodeURIComponent(payload)], { type: mimeType }), mimeType };
 };
 
-const triggerBlobDownload = (blob: Blob, filename: string) => {
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = filename;
-  document.body.appendChild(anchor);
-  anchor.click();
-  document.body.removeChild(anchor);
-  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-};
-
 export const LearningView: React.FC = () => {
   const {
     state,
@@ -114,6 +90,10 @@ export const LearningView: React.FC = () => {
   // Course Player State
   const [playingCourseId, setPlayingCourseId] = useState<string | null>(null);
   const [activeLessonId, setActiveLessonId] = useState<string | null>(null);
+  const [curriculumCollapsed, setCurriculumCollapsed] = useState(false);
+  const [isContentFullscreen, setIsContentFullscreen] = useState(false);
+  const [imageZoom, setImageZoom] = useState<number>(1);
+  const [imageBaseWidth, setImageBaseWidth] = useState<number | null>(null);
   const [quizOpen, setQuizOpen] = useState(false);
   const [quizAnswers, setQuizAnswers] = useState<Record<number, number>>({});
   const [lastAttemptResult, setLastAttemptResult] = useState<{ score: number; passed: boolean } | null>(null);
@@ -123,6 +103,7 @@ export const LearningView: React.FC = () => {
 
   // Course Builder State
   const [editingCourse, setEditingCourse] = useState<Course | null>(null);
+  const [staffSearch, setStaffSearch] = useState('');
   const [builderForm, setBuilderForm] = useState<Omit<Course, 'id' | 'createdAt'>>({
     title: '',
     category: 'Technical Engineering',
@@ -131,22 +112,56 @@ export const LearningView: React.FC = () => {
     prerequisiteCourseIds: [],
     completionRule: 'Both',
     autoAssignNewJoiners: false,
+    assignedUserIds: [],
+    assignedDepartments: [],
     certificateBgOverride: '',
     modules: [],
     quiz: { passingScore: 70, questions: [] },
   });
 
+  const departments = useMemo(
+    () =>
+      Array.from(
+        new Set(state.users.map((u) => u.department.trim()).filter(Boolean))
+      ).sort((a, b) => a.localeCompare(b)),
+    [state.users]
+  );
+
+  const isCourseAssignedToCurrentUser = (course: Course): boolean => {
+    const assignedUsers = course.assignedUserIds ?? [];
+    const assignedDepts = course.assignedDepartments ?? [];
+    if (assignedUsers.includes(currentUser.id)) return true;
+    if (
+      assignedDepts.some(
+        (d) => d.trim().toLowerCase() === currentUser.department.trim().toLowerCase()
+      )
+    ) {
+      return true;
+    }
+    if (course.autoAssignNewJoiners && currentUser.isNewJoiner) return true;
+    return state.enrollments.some((e) => e.userId === currentUser.id && e.courseId === course.id);
+  };
+
+  const accessibleCourses = useMemo(
+    () =>
+      state.courses.filter((c) =>
+        editable ? true : c.status === 'Published' && isCourseAssignedToCurrentUser(c)
+      ),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [state.courses, state.enrollments, editable, currentUser.id, currentUser.department, currentUser.isNewJoiner]
+  );
+
   const categories = useMemo(
-    () => Array.from(new Set(state.courses.map((c) => c.category))),
-    [state.courses]
+    () => Array.from(new Set(accessibleCourses.map((c) => c.category))),
+    [accessibleCourses]
   );
 
   const visibleCourses = useMemo(
     () =>
-      state.courses
-        .filter((c) => (editable ? true : c.status === 'Published'))
-        .filter((c) => (categoryFilter === 'all' ? true : c.category === categoryFilter)),
-    [state.courses, editable, categoryFilter]
+      accessibleCourses.filter((c) =>
+        categoryFilter === 'all' ? true : c.category === categoryFilter
+      ),
+    [accessibleCourses, categoryFilter]
   );
 
   const playingCourse = useMemo(
@@ -192,198 +207,30 @@ export const LearningView: React.FC = () => {
     };
   }, [pdfPreviewUrl]);
 
-  const handleDownloadLessonAsset = async (
-    content: string,
-    title: string,
-    fallbackExt: string
-  ) => {
-    const trimmed = content.trim();
-    if (!trimmed) {
-      notify('No downloadable file is attached to this lesson.', 'error');
-      return;
-    }
+  useEffect(() => {
+    setImageZoom(1);
+    setImageBaseWidth(null);
+  }, [activeLessonId, playingCourseId]);
 
-    const baseName = slugifyFilename(title) || 'lesson-resource';
-
-    if (trimmed.startsWith('data:')) {
-      try {
-        const { blob, mimeType } = dataUrlToBlob(trimmed);
-        const ext = inferExtensionFromMime(mimeType, fallbackExt);
-        triggerBlobDownload(blob, `${baseName}.${ext}`);
-        notify(`Downloaded ${baseName}.${ext}`);
-      } catch {
-        notify('Could not decode lesson file for download.', 'error');
-      }
-      return;
-    }
-
-    try {
-      const response = await fetch(trimmed);
-      if (!response.ok) throw new Error('Fetch failed');
-      const blob = await response.blob();
-      const ext = inferExtensionFromMime(blob.type, fallbackExt);
-      triggerBlobDownload(blob, `${baseName}.${ext}`);
-      notify(`Downloaded ${baseName}.${ext}`);
-    } catch {
-      const anchor = document.createElement('a');
-      anchor.href = trimmed;
-      anchor.download = `${baseName}.${fallbackExt}`;
-      anchor.target = '_blank';
-      anchor.rel = 'noreferrer';
-      document.body.appendChild(anchor);
-      anchor.click();
-      document.body.removeChild(anchor);
-    }
-  };
-
-  const handleDownloadTextLessonPdf = (courseTitle: string, lesson: Lesson) => {
-    if (!lesson.content.trim()) {
-      notify('This lesson has no text content to export.', 'error');
-      return;
-    }
-    const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
-    const pageWidth = pdf.internal.pageSize.getWidth();
-    const pageHeight = pdf.internal.pageSize.getHeight();
-    const margin = 18;
-    const maxWidth = pageWidth - margin * 2;
-    let y = 20;
-
-    pdf.setFont('helvetica', 'bold');
-    pdf.setFontSize(10);
-    pdf.setTextColor(3, 105, 161);
-    pdf.text(courseTitle.toUpperCase(), margin, y);
-    y += 7;
-
-    pdf.setFont('times', 'bold');
-    pdf.setFontSize(18);
-    pdf.setTextColor(17, 24, 39);
-    const titleLines = pdf.splitTextToSize(lesson.title, maxWidth);
-    pdf.text(titleLines, margin, y);
-    y += titleLines.length * 7 + 4;
-
-    pdf.setDrawColor(229, 231, 235);
-    pdf.line(margin, y, pageWidth - margin, y);
-    y += 8;
-
-    pdf.setFont('helvetica', 'normal');
-    pdf.setFontSize(11);
-    pdf.setTextColor(55, 65, 81);
-    const bodyLines = pdf.splitTextToSize(lesson.content, maxWidth);
-    for (const line of bodyLines) {
-      if (y > pageHeight - 18) {
-        pdf.addPage();
-        y = 20;
-      }
-      pdf.text(String(line), margin, y);
-      y += 5.5;
-    }
-
-    const fileName = `${slugifyFilename(lesson.title) || 'lesson-content'}.pdf`;
-    pdf.save(fileName);
-    notify(`Downloaded ${fileName}`);
-  };
-
-  const handleDownloadCourseContentPdf = (course: Course) => {
-    const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
-    const pageWidth = pdf.internal.pageSize.getWidth();
-    const pageHeight = pdf.internal.pageSize.getHeight();
-    const margin = 18;
-    const maxWidth = pageWidth - margin * 2;
-    let y = 20;
-
-    const ensureSpace = (neededMm: number) => {
-      if (y + neededMm > pageHeight - 18) {
-        pdf.addPage();
-        y = 20;
+  useEffect(() => {
+    if (!isContentFullscreen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setIsContentFullscreen(false);
       }
     };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [isContentFullscreen]);
 
-    pdf.setFont('helvetica', 'bold');
-    pdf.setFontSize(10);
-    pdf.setTextColor(3, 105, 161);
-    pdf.text(`${course.category.toUpperCase()} • COURSE MATERIAL`, margin, y);
-    y += 7;
-
-    pdf.setFont('times', 'bold');
-    pdf.setFontSize(20);
-    pdf.setTextColor(17, 24, 39);
-    const courseTitleLines = pdf.splitTextToSize(course.title, maxWidth);
-    pdf.text(courseTitleLines, margin, y);
-    y += courseTitleLines.length * 8 + 3;
-
-    if (course.description.trim()) {
-      pdf.setFont('helvetica', 'normal');
-      pdf.setFontSize(10.5);
-      pdf.setTextColor(75, 85, 99);
-      const descLines = pdf.splitTextToSize(course.description.trim(), maxWidth);
-      for (const line of descLines) {
-        ensureSpace(6);
-        pdf.text(String(line), margin, y);
-        y += 5;
-      }
-      y += 3;
-    }
-
-    pdf.setDrawColor(209, 213, 219);
-    pdf.line(margin, y, pageWidth - margin, y);
-    y += 8;
-
-    course.modules.forEach((mod, mIdx) => {
-      ensureSpace(14);
-      pdf.setFont('helvetica', 'bold');
-      pdf.setFontSize(13);
-      pdf.setTextColor(17, 24, 39);
-      const modLines = pdf.splitTextToSize(`${mIdx + 1}. ${mod.title}`, maxWidth);
-      pdf.text(modLines, margin, y);
-      y += modLines.length * 6 + 3;
-
-      mod.lessons.forEach((les, lIdx) => {
-        ensureSpace(12);
-        pdf.setFont('helvetica', 'bold');
-        pdf.setFontSize(11);
-        pdf.setTextColor(30, 58, 138);
-        const lesHeader = `${mIdx + 1}.${lIdx + 1} ${les.title} (${les.type.toUpperCase()} • ${les.durationMinutes}m)`;
-        const lesHeaderLines = pdf.splitTextToSize(lesHeader, maxWidth);
-        pdf.text(lesHeaderLines, margin, y);
-        y += lesHeaderLines.length * 5.5 + 2;
-
-        pdf.setFont('helvetica', 'normal');
-        pdf.setFontSize(10);
-        pdf.setTextColor(55, 65, 81);
-
-        if (les.type === 'text' && les.content.trim()) {
-          const contentLines = pdf.splitTextToSize(les.content.trim(), maxWidth);
-          for (const line of contentLines) {
-            ensureSpace(6);
-            pdf.text(String(line), margin, y);
-            y += 5;
-          }
-        } else if (les.content.trim()) {
-          const note = les.content.startsWith('data:')
-            ? `[Attached ${les.type.toUpperCase()} resource — available for direct download inside the lesson player.]`
-            : `Resource: ${les.content}`;
-          const noteLines = pdf.splitTextToSize(note, maxWidth);
-          for (const line of noteLines) {
-            ensureSpace(6);
-            pdf.text(String(line), margin, y);
-            y += 5;
-          }
-        } else {
-          ensureSpace(6);
-          pdf.text('No additional content attached.', margin, y);
-          y += 5;
-        }
-        y += 4;
-      });
-      y += 2;
-    });
-
-    const fileName = `${slugifyFilename(course.title) || 'course'}-content.pdf`;
-    pdf.save(fileName);
-    notify(`Downloaded ${fileName}`);
+  const adjustImageZoom = (delta: number) => {
+    setImageZoom((prev) => Math.min(3, Math.max(0.5, Math.round((prev + delta) * 100) / 100)));
   };
-
   const openCoursePlayer = (course: Course) => {
+    if (!editable && !isCourseAssignedToCurrentUser(course)) {
+      notify('This course has not been assigned to you.', 'error');
+      return;
+    }
     const enrolled = state.enrollments.find(
       (e) => e.userId === currentUser.id && e.courseId === course.id
     );
@@ -393,12 +240,17 @@ export const LearningView: React.FC = () => {
     setPlayingCourseId(course.id);
     const firstLesson = course.modules[0]?.lessons[0]?.id ?? null;
     setActiveLessonId(firstLesson);
+    setCurriculumCollapsed(false);
+    setIsContentFullscreen(false);
+    setImageZoom(1);
+    setImageBaseWidth(null);
     setQuizOpen(false);
     setQuizAnswers({});
     setLastAttemptResult(null);
   };
 
   const openBuilderForCourse = (course: Course | null) => {
+    setStaffSearch('');
     if (course) {
       setEditingCourse(course);
       setBuilderForm({
@@ -409,6 +261,8 @@ export const LearningView: React.FC = () => {
         prerequisiteCourseIds: course.prerequisiteCourseIds,
         completionRule: course.completionRule,
         autoAssignNewJoiners: course.autoAssignNewJoiners,
+        assignedUserIds: [...(course.assignedUserIds ?? [])],
+        assignedDepartments: [...(course.assignedDepartments ?? [])],
         certificateBgOverride: course.certificateBgOverride,
         modules: JSON.parse(JSON.stringify(course.modules)),
         quiz: JSON.parse(JSON.stringify(course.quiz)),
@@ -423,6 +277,8 @@ export const LearningView: React.FC = () => {
         prerequisiteCourseIds: [],
         completionRule: 'Both',
         autoAssignNewJoiners: false,
+        assignedUserIds: [],
+        assignedDepartments: [],
         certificateBgOverride: '',
         modules: [
           {
@@ -435,7 +291,7 @@ export const LearningView: React.FC = () => {
                 title: 'Introduction Manual',
                 type: 'text',
                 durationMinutes: 10,
-                content: 'Enter lesson guidance and operational checklist here.',
+                content: '<p>Enter lesson guidance and operational checklist here.</p>',
                 order: 1,
               },
             ],
@@ -465,6 +321,14 @@ export const LearningView: React.FC = () => {
   ) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    if (file.size > MAX_LESSON_FILE_BYTES) {
+      notify(
+        `File "${file.name}" (${(file.size / 1024 / 1024).toFixed(1)} MB) exceeds the 1.5 MB upload limit. Compress it or paste an external URL.`,
+        'error'
+      );
+      e.target.value = '';
+      return;
+    }
     const reader = new FileReader();
     reader.onload = () => {
       if (typeof reader.result !== 'string') return;
@@ -752,13 +616,297 @@ export const LearningView: React.FC = () => {
       allLessons.every((l) => playingEnrollment.completedLessonIds.includes(l.id));
     const quizUnlocked = allLessonsDone;
 
+    const renderImageToolbar = (inFullscreen: boolean) => (
+      <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 border-b border-neutral-200 dark:border-zinc-800 bg-white dark:bg-[#0A0A0C]">
+        <div className="flex items-center gap-1.5">
+          <button
+            type="button"
+            disabled={imageZoom <= 0.5}
+            onClick={() => adjustImageZoom(-0.25)}
+            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-neutral-200 dark:border-zinc-800 text-xs font-medium text-neutral-700 dark:text-neutral-200 hover:bg-neutral-50 dark:hover:bg-zinc-900 disabled:opacity-40 whitespace-nowrap"
+            title="Zoom Out"
+            aria-label="Zoom Out"
+          >
+            <ZoomOut className="h-3.5 w-3.5" />
+            <span>Zoom Out</span>
+          </button>
+          <span className="font-mono-tabular text-xs font-semibold text-neutral-700 dark:text-neutral-200 min-w-[3.25rem] text-center">
+            {Math.round(imageZoom * 100)}%
+          </span>
+          <button
+            type="button"
+            disabled={imageZoom >= 3}
+            onClick={() => adjustImageZoom(0.25)}
+            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-neutral-200 dark:border-zinc-800 text-xs font-medium text-neutral-700 dark:text-neutral-200 hover:bg-neutral-50 dark:hover:bg-zinc-900 disabled:opacity-40 whitespace-nowrap"
+            title="Zoom In"
+            aria-label="Zoom In"
+          >
+            <ZoomIn className="h-3.5 w-3.5" />
+            <span>Zoom In</span>
+          </button>
+          {imageZoom !== 1 && (
+            <button
+              type="button"
+              onClick={() => setImageZoom(1)}
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-neutral-200 dark:border-zinc-800 text-xs font-medium text-neutral-600 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-zinc-900 whitespace-nowrap"
+              title="Reset Zoom"
+            >
+              <RotateCcw className="h-3.5 w-3.5" />
+              <span>Reset</span>
+            </button>
+          )}
+        </div>
+
+        {!inFullscreen && (
+          <button
+            type="button"
+            onClick={() => setIsContentFullscreen(true)}
+            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-neutral-200 dark:border-zinc-800 text-xs font-medium text-neutral-700 dark:text-neutral-200 hover:bg-neutral-50 dark:hover:bg-zinc-900 whitespace-nowrap"
+          >
+            <Maximize2 className="h-3.5 w-3.5" />
+            <span>Fullscreen</span>
+          </button>
+        )}
+      </div>
+    );
+
+    const renderLessonBody = (lesson: Lesson, inFullscreen: boolean) => {
+      if (lesson.type === 'text') {
+        const cleanHtml = sanitizeLessonHtml(lesson.content);
+        if (stripHtmlToText(cleanHtml).length > 0) {
+          return (
+            <div
+              className={`lms-rich-text text-sm text-neutral-700 dark:text-neutral-300 leading-relaxed ${
+                inFullscreen
+                  ? 'max-w-4xl w-full mx-auto rounded-xl border border-neutral-200 dark:border-zinc-800 bg-white dark:bg-[#0A0A0C] p-6 sm:p-10'
+                  : ''
+              }`}
+              dangerouslySetInnerHTML={{ __html: cleanHtml }}
+            />
+          );
+        }
+        return (
+          <div className="rounded-lg border border-dashed border-neutral-200 dark:border-zinc-800 p-6 text-center text-xs text-neutral-500">
+            No written content added to this lesson yet.
+          </div>
+        );
+      }
+
+      if (lesson.type === 'video') {
+        if (!lesson.content.trim()) {
+          return (
+            <div className="rounded-lg border border-dashed border-neutral-200 dark:border-zinc-800 p-6 text-center text-xs text-neutral-500">
+              No video uploaded or linked to this lesson yet.
+            </div>
+          );
+        }
+        return (
+          <div
+            className={
+              inFullscreen
+                ? 'w-full max-w-6xl mx-auto aspect-video max-h-[calc(100vh-120px)] rounded-lg overflow-hidden border border-neutral-200 dark:border-zinc-800 bg-black'
+                : 'aspect-video w-full rounded-lg overflow-hidden border border-neutral-200 dark:border-zinc-800 bg-black'
+            }
+          >
+            {lesson.content.startsWith('data:video') ? (
+              <video src={lesson.content} controls className="w-full h-full" />
+            ) : (
+              <iframe
+                src={lesson.content}
+                title={lesson.title}
+                className="w-full h-full"
+                allowFullScreen
+              />
+            )}
+          </div>
+        );
+      }
+
+      if (lesson.type === 'image') {
+        if (!lesson.content.trim()) {
+          return (
+            <div className="rounded-lg border border-dashed border-neutral-200 dark:border-zinc-800 p-6 text-center text-xs text-neutral-500">
+              No image uploaded for this lesson yet.
+            </div>
+          );
+        }
+        return (
+          <div
+            className={`rounded-lg border border-neutral-200 dark:border-zinc-800 overflow-hidden bg-neutral-50 dark:bg-black flex flex-col ${
+              inFullscreen ? 'w-full h-full min-h-[calc(100vh-120px)]' : ''
+            }`}
+          >
+            {renderImageToolbar(inFullscreen)}
+            <div
+              className={`overflow-auto p-4 flex items-center justify-center ${
+                inFullscreen ? 'flex-1 min-h-0' : 'max-h-[520px] min-h-[260px]'
+              }`}
+            >
+              <img
+                src={lesson.content}
+                alt={lesson.title}
+                referrerPolicy="no-referrer"
+                onLoad={(e) => {
+                  if (imageZoom === 1) {
+                    setImageBaseWidth(e.currentTarget.clientWidth || 640);
+                  }
+                }}
+                style={
+                  imageZoom === 1
+                    ? undefined
+                    : {
+                        width: `${Math.round((imageBaseWidth || 640) * imageZoom)}px`,
+                        maxWidth: 'none',
+                        height: 'auto',
+                      }
+                }
+                className={
+                  imageZoom === 1
+                    ? inFullscreen
+                      ? 'max-h-[calc(100vh-200px)] max-w-full rounded object-contain mx-auto'
+                      : 'max-h-[440px] max-w-full rounded object-contain mx-auto'
+                    : 'rounded object-contain shrink-0'
+                }
+              />
+            </div>
+          </div>
+        );
+      }
+
+      if (lesson.type === 'pdf') {
+        if (!lesson.content.trim()) {
+          return (
+            <div className="rounded-lg border border-dashed border-neutral-200 dark:border-zinc-800 p-6 text-center text-xs text-neutral-500">
+              No PDF file attached to this lesson yet.
+            </div>
+          );
+        }
+        return (
+          <div className={`space-y-3 ${inFullscreen ? 'w-full h-full flex flex-col' : ''}`}>
+            {!inFullscreen && (
+              <div className="rounded-lg border border-neutral-200 dark:border-zinc-800 px-4 py-3 bg-neutral-50 dark:bg-black flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-3 min-w-0">
+                  <FileText className="h-6 w-6 text-sky-600 dark:text-sky-400 shrink-0" />
+                  <div className="min-w-0">
+                    <div className="text-sm font-semibold text-neutral-900 dark:text-neutral-100 truncate">
+                      {lesson.title}
+                    </div>
+                    <div className="text-xs text-neutral-500">PDF Reference Document</div>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsContentFullscreen(true)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-neutral-200 dark:border-zinc-800 hover:bg-white dark:hover:bg-zinc-900 text-neutral-700 dark:text-neutral-200 text-xs font-medium whitespace-nowrap shrink-0"
+                >
+                  <Maximize2 className="h-3.5 w-3.5" />
+                  <span>Fullscreen</span>
+                </button>
+              </div>
+            )}
+            {pdfPreviewUrl && (
+              <div
+                className={`rounded-lg border border-neutral-200 dark:border-zinc-800 overflow-hidden bg-white ${
+                  inFullscreen ? 'flex-1 min-h-[calc(100vh-115px)]' : ''
+                }`}
+              >
+                <iframe
+                  src={pdfPreviewUrl.url}
+                  title={lesson.title}
+                  className={inFullscreen ? 'w-full h-full min-h-[calc(100vh-115px)]' : 'w-full h-[540px]'}
+                />
+              </div>
+            )}
+          </div>
+        );
+      }
+
+      return (
+        <div
+          className={`rounded-lg border border-neutral-200 dark:border-zinc-800 p-6 bg-neutral-50 dark:bg-black flex flex-wrap items-center justify-between gap-4 ${
+            inFullscreen ? 'max-w-3xl w-full mx-auto' : ''
+          }`}
+        >
+          <div className="min-w-0">
+            <div className="text-sm font-semibold text-neutral-900 dark:text-neutral-100">
+              External Reference Resource
+            </div>
+            <div className="text-xs text-neutral-500 truncate mt-0.5">
+              {lesson.content || 'No URL provided'}
+            </div>
+          </div>
+          {lesson.content.trim() && (
+            <a
+              href={lesson.content}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-sky-600 text-white text-xs font-medium shrink-0 whitespace-nowrap"
+            >
+              <ExternalLink className="h-3.5 w-3.5" />
+              <span>Open Link</span>
+            </a>
+          )}
+        </div>
+      );
+    };
+
+    const lessonFullscreenModal =
+      isContentFullscreen && activeLesson && !quizOpen ? (
+        <div className="fixed inset-0 z-50 flex flex-col bg-neutral-50 dark:bg-black">
+          <header className="px-5 py-3 border-b border-neutral-200 dark:border-zinc-800 bg-white dark:bg-[#0A0A0C] flex flex-wrap items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="text-[11px] font-medium text-sky-600 dark:text-sky-400 uppercase truncate">
+                {playingCourse.title} · {activeLesson.type} Lesson
+              </div>
+              <h3 className="text-base font-display font-bold text-neutral-900 dark:text-neutral-100 truncate">
+                {activeLesson.title}
+              </h3>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() =>
+                  toggleLessonCompletion(currentUser.id, playingCourse.id, activeLesson.id)
+                }
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap ${
+                  playingEnrollment.completedLessonIds.includes(activeLesson.id)
+                    ? 'bg-amber-50 text-amber-800 border border-amber-200 dark:bg-amber-500/10 dark:text-amber-300 dark:border-amber-500/30'
+                    : 'bg-sky-600 hover:bg-sky-700 text-white'
+                }`}
+              >
+                <CheckCircle2 className="h-3.5 w-3.5" />
+                <span>
+                  {playingEnrollment.completedLessonIds.includes(activeLesson.id)
+                    ? 'Completed'
+                    : 'Mark Lesson Complete'}
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setIsContentFullscreen(false)}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-neutral-200 dark:border-zinc-800 bg-white dark:bg-black hover:bg-neutral-100 dark:hover:bg-zinc-900 text-xs font-medium text-neutral-700 dark:text-neutral-200 whitespace-nowrap"
+              >
+                <Minimize2 className="h-3.5 w-3.5" />
+                <span>Exit Fullscreen</span>
+              </button>
+            </div>
+          </header>
+          <div className="flex-1 min-h-0 overflow-auto p-4 sm:p-6 flex items-start justify-center">
+            {renderLessonBody(activeLesson, true)}
+          </div>
+        </div>
+      ) : null;
+
     return (
       <div className="space-y-4">
         <div className="rounded-xl border border-neutral-200 dark:border-zinc-800 bg-white dark:bg-[#0A0A0C] px-5 py-4 flex flex-wrap items-center justify-between gap-3">
           <div>
             <button
               type="button"
-              onClick={() => setPlayingCourseId(null)}
+              onClick={() => {
+                setIsContentFullscreen(false);
+                setPlayingCourseId(null);
+              }}
               className="text-xs font-medium text-sky-600 dark:text-sky-400 hover:underline"
             >
               ← Back to Course Catalog
@@ -772,17 +920,24 @@ export const LearningView: React.FC = () => {
             <span className="text-xs font-mono-tabular text-neutral-500">
               {completedCount}/{allLessons.length} Lessons Completed
             </span>
-            {(allLessons.length > 0 || playingCourse.description.trim().length > 0) && (
-              <button
-                type="button"
-                onClick={() => handleDownloadCourseContentPdf(playingCourse)}
-                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-neutral-200 dark:border-zinc-800 hover:bg-neutral-50 dark:hover:bg-zinc-900 text-neutral-700 dark:text-neutral-200 text-xs font-medium whitespace-nowrap shrink-0"
-                title="Download full course syllabus & text content as PDF"
-              >
-                <Download className="h-3.5 w-3.5" />
-                <span>Course Content PDF</span>
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={() => setCurriculumCollapsed((v) => !v)}
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-neutral-200 dark:border-zinc-800 hover:bg-neutral-50 dark:hover:bg-zinc-900 text-neutral-700 dark:text-neutral-200 text-xs font-medium whitespace-nowrap shrink-0"
+              title={curriculumCollapsed ? 'Show Course Curriculum' : 'Hide Course Curriculum'}
+            >
+              {curriculumCollapsed ? (
+                <>
+                  <PanelLeftOpen className="h-3.5 w-3.5" />
+                  <span>Show Curriculum</span>
+                </>
+              ) : (
+                <>
+                  <PanelLeftClose className="h-3.5 w-3.5" />
+                  <span>Hide Curriculum</span>
+                </>
+              )}
+            </button>
             {playingEnrollment.passed && (
               <button
                 type="button"
@@ -797,87 +952,104 @@ export const LearningView: React.FC = () => {
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-          {/* Left Syllabus Sidebar */}
-          <aside className="lg:col-span-4 rounded-xl border border-neutral-200 dark:border-zinc-800 bg-white dark:bg-[#0A0A0C] overflow-hidden">
-            <div className="p-4 border-b border-neutral-200 dark:border-zinc-800 text-xs font-semibold text-neutral-500 dark:text-neutral-400">
-              Course Curriculum
-            </div>
-            <div className="divide-y divide-neutral-100 dark:divide-zinc-800">
-              {playingCourse.modules.map((mod) => (
-                <div key={mod.id} className="p-3 space-y-1.5">
-                  <div className="px-2 text-xs font-semibold text-neutral-900 dark:text-neutral-100">
-                    {mod.title}
+          {/* Left Collapsible Syllabus Sidebar */}
+          {!curriculumCollapsed && (
+            <aside className="lg:col-span-4 rounded-xl border border-neutral-200 dark:border-zinc-800 bg-white dark:bg-[#0A0A0C] overflow-hidden">
+              <div className="px-4 py-3 border-b border-neutral-200 dark:border-zinc-800 flex items-center justify-between gap-2">
+                <span className="text-xs font-semibold text-neutral-500 dark:text-neutral-400">
+                  Course Curriculum
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setCurriculumCollapsed(true)}
+                  className="inline-flex items-center gap-1 text-[11px] font-medium text-neutral-500 hover:text-neutral-900 dark:text-neutral-400 dark:hover:text-neutral-100 whitespace-nowrap"
+                  title="Collapse Course Curriculum"
+                >
+                  <PanelLeftClose className="h-3.5 w-3.5" />
+                  <span>Collapse</span>
+                </button>
+              </div>
+              <div className="divide-y divide-neutral-100 dark:divide-zinc-800">
+                {playingCourse.modules.map((mod) => (
+                  <div key={mod.id} className="p-3 space-y-1.5">
+                    <div className="px-2 text-xs font-semibold text-neutral-900 dark:text-neutral-100">
+                      {mod.title}
+                    </div>
+                    {mod.lessons.map((les) => {
+                      const done = playingEnrollment.completedLessonIds.includes(les.id);
+                      const isCurr = !quizOpen && activeLesson?.id === les.id;
+                      return (
+                        <button
+                          key={les.id}
+                          type="button"
+                          onClick={() => {
+                            setQuizOpen(false);
+                            setActiveLessonId(les.id);
+                          }}
+                          className={`w-full flex items-center justify-between gap-2 px-2.5 py-2 rounded-lg text-left text-xs transition-colors ${
+                            isCurr
+                              ? 'bg-sky-50 dark:bg-sky-500/15 text-sky-700 dark:text-sky-400 font-medium'
+                              : 'text-neutral-600 dark:text-neutral-400 hover:bg-neutral-50 dark:hover:bg-zinc-900'
+                          }`}
+                        >
+                          <span className="flex items-center gap-2 min-w-0">
+                            {done ? (
+                              <CheckCircle2 className="h-4 w-4 text-amber-500 dark:text-amber-400 shrink-0" />
+                            ) : (
+                              <Circle className="h-4 w-4 text-neutral-300 dark:text-zinc-600 shrink-0" />
+                            )}
+                            <span className="truncate">{les.title}</span>
+                          </span>
+                          <span className="font-mono-tabular text-[11px] text-neutral-400 shrink-0">
+                            {les.durationMinutes}m
+                          </span>
+                        </button>
+                      );
+                    })}
                   </div>
-                  {mod.lessons.map((les) => {
-                    const done = playingEnrollment.completedLessonIds.includes(les.id);
-                    const isCurr = !quizOpen && activeLesson?.id === les.id;
-                    return (
-                      <button
-                        key={les.id}
-                        type="button"
-                        onClick={() => {
-                          setQuizOpen(false);
-                          setActiveLessonId(les.id);
-                        }}
-                        className={`w-full flex items-center justify-between gap-2 px-2.5 py-2 rounded-lg text-left text-xs transition-colors ${
-                          isCurr
-                            ? 'bg-sky-50 dark:bg-sky-500/15 text-sky-700 dark:text-sky-400 font-medium'
-                            : 'text-neutral-600 dark:text-neutral-400 hover:bg-neutral-50 dark:hover:bg-zinc-900'
-                        }`}
-                      >
-                        <span className="flex items-center gap-2 min-w-0">
-                          {done ? (
-                            <CheckCircle2 className="h-4 w-4 text-amber-500 dark:text-amber-400 shrink-0" />
-                          ) : (
-                            <Circle className="h-4 w-4 text-neutral-300 dark:text-zinc-600 shrink-0" />
-                          )}
-                          <span className="truncate">{les.title}</span>
-                        </span>
-                        <span className="font-mono-tabular text-[11px] text-neutral-400 shrink-0">
-                          {les.durationMinutes}m
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-              ))}
+                ))}
 
-              {/* Final Assessment Gate */}
-              {playingCourse.quiz.questions.length > 0 && (
-                <div className="p-3">
-                  <button
-                    type="button"
-                    disabled={!quizUnlocked}
-                    onClick={() => {
-                      setQuizOpen(true);
-                      setLastAttemptResult(null);
-                    }}
-                    className={`w-full flex items-center justify-between gap-2 px-3 py-2.5 rounded-lg text-xs font-semibold transition-colors ${
-                      quizOpen
-                        ? 'bg-sky-600 text-white'
-                        : quizUnlocked
-                          ? 'bg-sky-50 dark:bg-sky-500/15 text-sky-700 dark:text-sky-400 hover:bg-sky-100 dark:hover:bg-sky-500/20'
-                          : 'bg-neutral-100 dark:bg-zinc-900 text-neutral-400 cursor-not-allowed'
-                    }`}
-                  >
-                    <span className="flex items-center gap-2">
-                      {!quizUnlocked && <Lock className="h-3.5 w-3.5" />}
-                      <span>Final Assessment Quiz</span>
-                    </span>
-                    <span className="font-mono-tabular">Pass: {playingCourse.quiz.passingScore}%</span>
-                  </button>
-                  {!quizUnlocked && (
-                    <p className="mt-1.5 px-1 text-[11px] text-neutral-400">
-                      Complete 100% of lessons to unlock the quiz.
-                    </p>
-                  )}
-                </div>
-              )}
-            </div>
-          </aside>
+                {/* Final Assessment Gate */}
+                {playingCourse.quiz.questions.length > 0 && (
+                  <div className="p-3">
+                    <button
+                      type="button"
+                      disabled={!quizUnlocked}
+                      onClick={() => {
+                        setQuizOpen(true);
+                        setLastAttemptResult(null);
+                      }}
+                      className={`w-full flex items-center justify-between gap-2 px-3 py-2.5 rounded-lg text-xs font-semibold transition-colors ${
+                        quizOpen
+                          ? 'bg-sky-600 text-white'
+                          : quizUnlocked
+                            ? 'bg-sky-50 dark:bg-sky-500/15 text-sky-700 dark:text-sky-400 hover:bg-sky-100 dark:hover:bg-sky-500/20'
+                            : 'bg-neutral-100 dark:bg-zinc-900 text-neutral-400 cursor-not-allowed'
+                      }`}
+                    >
+                      <span className="flex items-center gap-2">
+                        {!quizUnlocked && <Lock className="h-3.5 w-3.5" />}
+                        <span>Final Assessment Quiz</span>
+                      </span>
+                      <span className="font-mono-tabular">Pass: {playingCourse.quiz.passingScore}%</span>
+                    </button>
+                    {!quizUnlocked && (
+                      <p className="mt-1.5 px-1 text-[11px] text-neutral-400">
+                        Complete 100% of lessons to unlock the quiz.
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+            </aside>
+          )}
 
           {/* Right Content / Quiz Stage */}
-          <section className="lg:col-span-8 rounded-xl border border-neutral-200 dark:border-zinc-800 bg-white dark:bg-[#0A0A0C] p-6">
+          <section
+            className={`${
+              curriculumCollapsed ? 'lg:col-span-12' : 'lg:col-span-8'
+            } rounded-xl border border-neutral-200 dark:border-zinc-800 bg-white dark:bg-[#0A0A0C] p-6`}
+          >
             {quizOpen ? (
               <div className="space-y-6">
                 <div className="flex items-center justify-between border-b border-neutral-200 dark:border-zinc-800 pb-4">
@@ -990,57 +1162,14 @@ export const LearningView: React.FC = () => {
                   </div>
 
                   <div className="flex flex-wrap items-center gap-2">
-                    {activeLesson.type === 'text' && activeLesson.content.trim() && (
-                      <button
-                        type="button"
-                        onClick={() => handleDownloadTextLessonPdf(playingCourse.title, activeLesson)}
-                        className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-neutral-200 dark:border-zinc-800 hover:bg-neutral-50 dark:hover:bg-zinc-900 text-neutral-700 dark:text-neutral-200 text-xs font-medium whitespace-nowrap shrink-0"
-                      >
-                        <Download className="h-3.5 w-3.5" />
-                        <span>Download PDF</span>
-                      </button>
-                    )}
-
-                    {activeLesson.type === 'pdf' && activeLesson.content.trim() && (
-                      <button
-                        type="button"
-                        onClick={() =>
-                          handleDownloadLessonAsset(activeLesson.content, activeLesson.title, 'pdf')
-                        }
-                        className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-neutral-200 dark:border-zinc-800 hover:bg-neutral-50 dark:hover:bg-zinc-900 text-neutral-700 dark:text-neutral-200 text-xs font-medium whitespace-nowrap shrink-0"
-                      >
-                        <Download className="h-3.5 w-3.5" />
-                        <span>Download PDF</span>
-                      </button>
-                    )}
-
-                    {activeLesson.type === 'image' && activeLesson.content.trim() && (
-                      <button
-                        type="button"
-                        onClick={() =>
-                          handleDownloadLessonAsset(activeLesson.content, activeLesson.title, 'png')
-                        }
-                        className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-neutral-200 dark:border-zinc-800 hover:bg-neutral-50 dark:hover:bg-zinc-900 text-neutral-700 dark:text-neutral-200 text-xs font-medium whitespace-nowrap shrink-0"
-                      >
-                        <Download className="h-3.5 w-3.5" />
-                        <span>Download Image</span>
-                      </button>
-                    )}
-
-                    {activeLesson.type === 'video' &&
-                      (activeLesson.content.startsWith('data:video') ||
-                        /\.(mp4|webm|mov|m4v)(\?.*)?$/i.test(activeLesson.content.trim())) && (
-                        <button
-                          type="button"
-                          onClick={() =>
-                            handleDownloadLessonAsset(activeLesson.content, activeLesson.title, 'mp4')
-                          }
-                          className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-neutral-200 dark:border-zinc-800 hover:bg-neutral-50 dark:hover:bg-zinc-900 text-neutral-700 dark:text-neutral-200 text-xs font-medium whitespace-nowrap shrink-0"
-                        >
-                          <Download className="h-3.5 w-3.5" />
-                          <span>Download Video</span>
-                        </button>
-                      )}
+                    <button
+                      type="button"
+                      onClick={() => setIsContentFullscreen(true)}
+                      className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-neutral-200 dark:border-zinc-800 hover:bg-neutral-50 dark:hover:bg-zinc-900 text-neutral-700 dark:text-neutral-200 text-xs font-medium whitespace-nowrap shrink-0"
+                    >
+                      <Maximize2 className="h-3.5 w-3.5" />
+                      <span>Fullscreen</span>
+                    </button>
 
                     <button
                       type="button"
@@ -1063,133 +1192,7 @@ export const LearningView: React.FC = () => {
                   </div>
                 </div>
 
-                {activeLesson.type === 'text' && (
-                  activeLesson.content.trim() ? (
-                    <div className="prose prose-sm dark:prose-invert max-w-none whitespace-pre-line text-sm text-neutral-700 dark:text-neutral-300 leading-relaxed">
-                      {activeLesson.content}
-                    </div>
-                  ) : (
-                    <div className="rounded-lg border border-dashed border-neutral-200 dark:border-zinc-800 p-6 text-center text-xs text-neutral-500">
-                      No written content added to this lesson yet.
-                    </div>
-                  )
-                )}
-
-                {activeLesson.type === 'video' && (
-                  activeLesson.content.trim() ? (
-                    <div className="aspect-video w-full rounded-lg overflow-hidden border border-neutral-200 dark:border-zinc-800 bg-black">
-                      {activeLesson.content.startsWith('data:video') ? (
-                        <video src={activeLesson.content} controls className="w-full h-full" />
-                      ) : (
-                        <iframe
-                          src={activeLesson.content}
-                          title={activeLesson.title}
-                          className="w-full h-full"
-                          allowFullScreen
-                        />
-                      )}
-                    </div>
-                  ) : (
-                    <div className="rounded-lg border border-dashed border-neutral-200 dark:border-zinc-800 p-6 text-center text-xs text-neutral-500">
-                      No video uploaded or linked to this lesson yet.
-                    </div>
-                  )
-                )}
-
-                {activeLesson.type === 'image' && (
-                  activeLesson.content.trim() ? (
-                    <div className="rounded-lg border border-neutral-200 dark:border-zinc-800 overflow-hidden bg-neutral-50 dark:bg-black p-3">
-                      <img
-                        src={activeLesson.content}
-                        alt={activeLesson.title}
-                        referrerPolicy="no-referrer"
-                        className="max-h-[420px] mx-auto rounded object-contain"
-                      />
-                    </div>
-                  ) : (
-                    <div className="rounded-lg border border-dashed border-neutral-200 dark:border-zinc-800 p-6 text-center text-xs text-neutral-500">
-                      No image uploaded for this lesson yet.
-                    </div>
-                  )
-                )}
-
-                {activeLesson.type === 'pdf' && (
-                  activeLesson.content.trim() ? (
-                    <div className="space-y-3">
-                      <div className="rounded-lg border border-neutral-200 dark:border-zinc-800 p-5 bg-neutral-50 dark:bg-black flex flex-wrap items-center justify-between gap-4">
-                        <div className="flex items-center gap-3 min-w-0">
-                          <FileText className="h-8 w-8 text-sky-600 dark:text-sky-400 shrink-0" />
-                          <div className="min-w-0">
-                            <div className="text-sm font-semibold text-neutral-900 dark:text-neutral-100 truncate">
-                              {activeLesson.title}
-                            </div>
-                            <div className="text-xs text-neutral-500">PDF Reference Document</div>
-                          </div>
-                        </div>
-                        <div className="flex items-center gap-2 shrink-0">
-                          <button
-                            type="button"
-                            onClick={() =>
-                              handleDownloadLessonAsset(activeLesson.content, activeLesson.title, 'pdf')
-                            }
-                            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-sky-600 hover:bg-sky-700 text-white text-xs font-medium whitespace-nowrap"
-                          >
-                            <Download className="h-3.5 w-3.5" />
-                            <span>Download PDF</span>
-                          </button>
-                          {!activeLesson.content.startsWith('data:') && (
-                            <a
-                              href={activeLesson.content}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-neutral-200 dark:border-zinc-800 hover:bg-white dark:hover:bg-zinc-900 text-neutral-700 dark:text-neutral-200 text-xs font-medium whitespace-nowrap"
-                            >
-                              <ExternalLink className="h-3.5 w-3.5" />
-                              <span>Open</span>
-                            </a>
-                          )}
-                        </div>
-                      </div>
-                      {pdfPreviewUrl && (
-                        <div className="rounded-lg border border-neutral-200 dark:border-zinc-800 overflow-hidden bg-white">
-                          <iframe
-                            src={pdfPreviewUrl.url}
-                            title={activeLesson.title}
-                            className="w-full h-[520px]"
-                          />
-                        </div>
-                      )}
-                    </div>
-                  ) : (
-                    <div className="rounded-lg border border-dashed border-neutral-200 dark:border-zinc-800 p-6 text-center text-xs text-neutral-500">
-                      No PDF file attached to this lesson yet.
-                    </div>
-                  )
-                )}
-
-                {activeLesson.type === 'link' && (
-                  <div className="rounded-lg border border-neutral-200 dark:border-zinc-800 p-6 bg-neutral-50 dark:bg-black flex items-center justify-between gap-4">
-                    <div className="min-w-0">
-                      <div className="text-sm font-semibold text-neutral-900 dark:text-neutral-100">
-                        External Reference Resource
-                      </div>
-                      <div className="text-xs text-neutral-500 truncate mt-0.5">
-                        {activeLesson.content || 'No URL provided'}
-                      </div>
-                    </div>
-                    {activeLesson.content.trim() && (
-                      <a
-                        href={activeLesson.content}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-sky-600 text-white text-xs font-medium shrink-0"
-                      >
-                        <ExternalLink className="h-3.5 w-3.5" />
-                        <span>Open Link</span>
-                      </a>
-                    )}
-                  </div>
-                )}
+                {renderLessonBody(activeLesson, false)}
               </div>
             ) : (
               <div className="p-8 text-center text-sm text-neutral-500">No lessons in this course yet.</div>
@@ -1197,6 +1200,7 @@ export const LearningView: React.FC = () => {
           </section>
         </div>
 
+        {lessonFullscreenModal}
         {certificateModal}
       </div>
     );
@@ -1323,6 +1327,18 @@ export const LearningView: React.FC = () => {
                         <span className="text-amber-600 dark:text-amber-400 font-medium">Auto-Assign New Joiners</span>
                       </>
                     )}
+                    {editable && (
+                      <>
+                        <span>·</span>
+                        <span>
+                          {(course.assignedUserIds?.length ?? 0) + (course.assignedDepartments?.length ?? 0) > 0
+                            ? `Assigned: ${course.assignedUserIds?.length ?? 0} staff, ${course.assignedDepartments?.length ?? 0} dept`
+                            : course.autoAssignNewJoiners
+                              ? 'New Joiners only'
+                              : 'Unassigned'}
+                        </span>
+                      </>
+                    )}
                   </div>
 
                   {prereqCourse && (
@@ -1374,20 +1390,6 @@ export const LearningView: React.FC = () => {
                       </button>
                     )}
 
-                    {!prereqCourse &&
-                      (course.status === 'Published' || editable) &&
-                      (totalLessons > 0 || course.description.trim().length > 0) && (
-                        <button
-                          type="button"
-                          onClick={() => handleDownloadCourseContentPdf(course)}
-                          className="p-2 rounded-lg border border-neutral-200 dark:border-zinc-800 text-neutral-600 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-zinc-900 shrink-0"
-                          title="Download Course Content PDF"
-                          aria-label={`Download ${course.title} content PDF`}
-                        >
-                          <Download className="h-3.5 w-3.5" />
-                        </button>
-                      )}
-
                     {editable && (
                       <>
                         <button
@@ -1418,10 +1420,12 @@ export const LearningView: React.FC = () => {
             <div className="col-span-full rounded-xl border border-neutral-200 dark:border-zinc-800 bg-white dark:bg-[#0A0A0C] p-12 text-center space-y-3">
               <BookOpen className="h-9 w-9 text-neutral-300 dark:text-zinc-700 mx-auto" />
               <div className="text-sm font-medium text-neutral-900 dark:text-neutral-100">
-                No courses created yet
+                {editable ? 'No courses created yet' : 'No courses assigned to you yet'}
               </div>
               <p className="text-xs text-neutral-500 dark:text-neutral-400">
-                Create structured training modules and certification assessments in the Course Builder.
+                {editable
+                  ? 'Create structured training modules and certification assessments in the Course Builder.'
+                  : 'Courses assigned to you or your department by an Administrator or Module Editor will appear here.'}
               </p>
               {editable && (
                 <button
@@ -1530,6 +1534,160 @@ export const LearningView: React.FC = () => {
                 </label>
               </div>
 
+              {/* Course Assignment Controls */}
+              <div className="pt-4 border-t border-neutral-200 dark:border-zinc-800 space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <Users className="h-4 w-4 text-sky-600 dark:text-sky-400" />
+                    <div>
+                      <h4 className="text-sm font-semibold text-neutral-900 dark:text-neutral-100">
+                        Course Assignment & Access
+                      </h4>
+                      <p className="text-[11px] text-neutral-500 dark:text-neutral-400">
+                        Only assigned staff members or departments can access this course once Published.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Department Assignment */}
+                {departments.length > 0 && (
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-medium text-neutral-600 dark:text-neutral-400">
+                        Assign by Department ({(builderForm.assignedDepartments ?? []).length})
+                      </span>
+                      {(builderForm.assignedDepartments ?? []).length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => setBuilderForm({ ...builderForm, assignedDepartments: [] })}
+                          className="text-[11px] text-sky-600 dark:text-sky-400 hover:underline"
+                        >
+                          Clear
+                        </button>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {departments.map((dept) => {
+                        const checked = (builderForm.assignedDepartments ?? []).includes(dept);
+                        return (
+                          <label
+                            key={dept}
+                            className={`inline-flex items-center gap-2 px-2.5 py-1.5 rounded-lg border text-xs cursor-pointer transition-colors ${
+                              checked
+                                ? 'border-sky-600 bg-sky-50 dark:bg-sky-500/15 text-sky-700 dark:text-sky-300 font-medium'
+                                : 'border-neutral-200 dark:border-zinc-800 bg-neutral-50 dark:bg-black text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-zinc-900'
+                            }`}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() => {
+                                const current = builderForm.assignedDepartments ?? [];
+                                const next = checked
+                                  ? current.filter((d) => d !== dept)
+                                  : [...current, dept];
+                                setBuilderForm({ ...builderForm, assignedDepartments: next });
+                              }}
+                              className="accent-sky-600"
+                            />
+                            <span>{dept}</span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* Individual Staff Assignment */}
+                <div className="space-y-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-xs font-medium text-neutral-600 dark:text-neutral-400">
+                      Assign Specific Staff ({(builderForm.assignedUserIds ?? []).length})
+                    </span>
+                    <div className="flex items-center gap-3 text-[11px]">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setBuilderForm({
+                            ...builderForm,
+                            assignedUserIds: state.users.filter((u) => u.isActive).map((u) => u.id),
+                          })
+                        }
+                        className="text-sky-600 dark:text-sky-400 hover:underline"
+                      >
+                        Select All Active
+                      </button>
+                      {(builderForm.assignedUserIds ?? []).length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => setBuilderForm({ ...builderForm, assignedUserIds: [] })}
+                          className="text-neutral-500 hover:text-neutral-900 dark:hover:text-neutral-200 hover:underline"
+                        >
+                          Clear
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="relative">
+                    <Search className="h-3.5 w-3.5 text-neutral-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="text"
+                      value={staffSearch}
+                      onChange={(e) => setStaffSearch(e.target.value)}
+                      placeholder="Filter staff by name or department..."
+                      className="w-full pl-8 pr-3 py-1.5 rounded-lg border border-neutral-200 dark:border-zinc-800 bg-white dark:bg-black text-xs text-neutral-900 dark:text-neutral-100"
+                    />
+                  </div>
+
+                  <div className="max-h-44 overflow-y-auto rounded-lg border border-neutral-200 dark:border-zinc-800 divide-y divide-neutral-100 dark:divide-zinc-800 bg-neutral-50/50 dark:bg-black">
+                    {state.users
+                      .filter((u) => u.isActive)
+                      .filter((u) => {
+                        const q = staffSearch.trim().toLowerCase();
+                        if (!q) return true;
+                        return (
+                          u.fullName.toLowerCase().includes(q) ||
+                          u.department.toLowerCase().includes(q) ||
+                          u.email.toLowerCase().includes(q)
+                        );
+                      })
+                      .map((u) => {
+                        const checked = (builderForm.assignedUserIds ?? []).includes(u.id);
+                        return (
+                          <label
+                            key={u.id}
+                            className="flex items-center justify-between gap-2 px-3 py-2 text-xs cursor-pointer hover:bg-white dark:hover:bg-zinc-900"
+                          >
+                            <span className="flex items-center gap-2.5 min-w-0">
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={() => {
+                                  const current = builderForm.assignedUserIds ?? [];
+                                  const next = checked
+                                    ? current.filter((id) => id !== u.id)
+                                    : [...current, u.id];
+                                  setBuilderForm({ ...builderForm, assignedUserIds: next });
+                                }}
+                                className="accent-sky-600 shrink-0"
+                              />
+                              <UserAvatar name={u.fullName} avatarUrl={u.avatarUrl} size="xs" />
+                              <span className="font-medium text-neutral-900 dark:text-neutral-100 truncate">
+                                {u.fullName}
+                              </span>
+                            </span>
+                            <span className="text-[11px] text-neutral-500 dark:text-neutral-400 shrink-0">
+                              {u.department}
+                            </span>
+                          </label>
+                        );
+                      })}
+                  </div>
+                </div>
+              </div>
+
               {/* Modules & Ordered Lessons */}
               <div className="pt-4 border-t border-neutral-200 dark:border-zinc-800 space-y-4">
                 <div className="flex items-center justify-between">
@@ -1636,16 +1794,14 @@ export const LearningView: React.FC = () => {
                         </div>
 
                         {les.type === 'text' ? (
-                          <textarea
-                            rows={2}
+                          <RichTextLessonEditor
+                            key={les.id}
                             value={les.content}
-                            onChange={(e) => {
+                            onChange={(html) => {
                               const next = [...builderForm.modules];
-                              next[mIdx].lessons[lIdx].content = e.target.value;
+                              next[mIdx].lessons[lIdx].content = html;
                               setBuilderForm({ ...builderForm, modules: next });
                             }}
-                            placeholder="Lesson manual content..."
-                            className="w-full rounded border border-neutral-200 dark:border-zinc-800 bg-white dark:bg-black p-2 text-xs text-neutral-900 dark:text-neutral-100"
                           />
                         ) : les.type === 'image' ? (
                           <ImageUploadField
@@ -1661,30 +1817,32 @@ export const LearningView: React.FC = () => {
                             onError={(msg) => notify(msg, 'error')}
                           />
                         ) : (
-                          <div className="flex items-center gap-2">
-                            <input
-                              type="text"
-                              value={les.content}
-                              onChange={(e) => {
-                                const next = [...builderForm.modules];
-                                next[mIdx].lessons[lIdx].content = e.target.value;
-                                setBuilderForm({ ...builderForm, modules: next });
-                              }}
-                              placeholder={les.type === 'link' ? 'Enter reference URL...' : 'Enter URL or upload file...'}
-                              className="flex-1 rounded border border-neutral-200 dark:border-zinc-800 bg-white dark:bg-black px-2.5 py-1 text-xs text-neutral-900 dark:text-neutral-100"
-                            />
-                            {(les.type === 'video' || les.type === 'pdf') && (
-                              <label className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-neutral-200 dark:border-zinc-800 text-xs cursor-pointer hover:bg-neutral-50 dark:hover:bg-zinc-900">
-                                <Upload className="h-3 w-3" />
-                                <span>Upload</span>
-                                <input
-                                  type="file"
-                                  accept={les.type === 'video' ? 'video/*' : 'application/pdf'}
-                                  className="hidden"
-                                  onChange={(e) => handleUploadLessonMedia(mIdx, lIdx, e)}
-                                />
-                              </label>
-                            )}
+                          <div className="space-y-1">
+                            <div className="flex items-center gap-2">
+                              <input
+                                type="text"
+                                value={les.content}
+                                onChange={(e) => {
+                                  const next = [...builderForm.modules];
+                                  next[mIdx].lessons[lIdx].content = e.target.value;
+                                  setBuilderForm({ ...builderForm, modules: next });
+                                }}
+                                placeholder={les.type === 'link' ? 'Enter reference URL...' : 'Enter URL or upload file (max 1.5 MB)...'}
+                                className="flex-1 rounded border border-neutral-200 dark:border-zinc-800 bg-white dark:bg-black px-2.5 py-1 text-xs text-neutral-900 dark:text-neutral-100"
+                              />
+                              {(les.type === 'video' || les.type === 'pdf') && (
+                                <label className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-neutral-200 dark:border-zinc-800 text-xs cursor-pointer hover:bg-neutral-50 dark:hover:bg-zinc-900 whitespace-nowrap">
+                                  <Upload className="h-3 w-3" />
+                                  <span>Upload</span>
+                                  <input
+                                    type="file"
+                                    accept={les.type === 'video' ? 'video/*' : 'application/pdf'}
+                                    className="hidden"
+                                    onChange={(e) => handleUploadLessonMedia(mIdx, lIdx, e)}
+                                  />
+                                </label>
+                              )}
+                            </div>
                           </div>
                         )}
                       </div>

@@ -224,6 +224,8 @@ export interface Course {
   prerequisiteCourseIds: string[];
   completionRule: CompletionRule;
   autoAssignNewJoiners: boolean;
+  assignedUserIds?: string[];
+  assignedDepartments?: string[];
   certificateBgOverride: string;
   modules: CourseModule[];
   quiz: Quiz;

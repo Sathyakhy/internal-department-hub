@@ -29,56 +29,13 @@ import {
 import { getRowField, parseBooleanCell } from '../utils/excel';
 import { canEditModule, canViewModule, getEffectivePermission } from '../utils/rbac';
 
-const STORAGE_KEY = 'department_os_state_v2';
-const CLOUD_MIGRATION_KEY = 'department_os_cloud_migrated_project';
-
 export type CloudSyncStatus = 'connecting' | 'synced' | 'error' | 'offline';
+
+const MAX_CLOUD_PAYLOAD_BYTES = 5_500_000;
 
 const clone = <T,>(val: T): T => JSON.parse(JSON.stringify(val));
 
 const uid = (prefix: string) => `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-
-function hasCustomWorkspaceData(candidate: Partial<AppState> | null | undefined): boolean {
-  if (!candidate) return false;
-  if ((candidate.courses?.length ?? 0) > 0) return true;
-  if ((candidate.enrollments?.length ?? 0) > 0) return true;
-  if ((candidate.projects?.length ?? 0) > 0) return true;
-  if ((candidate.tasks?.length ?? 0) > 0) return true;
-  if ((candidate.positions?.length ?? 0) > 0) return true;
-  if ((candidate.announcements?.length ?? 0) > 0) return true;
-  if ((candidate.customers?.length ?? 0) > 0) return true;
-  if ((candidate.vendors?.length ?? 0) > 0) return true;
-  if ((candidate.products?.length ?? 0) > 0) return true;
-  if ((candidate.onboardingItems?.length ?? 0) > 0) return true;
-  if ((candidate.projectUpdates?.length ?? 0) > 0) return true;
-  if ((candidate.filterPresets?.length ?? 0) > 0) return true;
-  if ((candidate.auditLogs?.length ?? 0) > 0) return true;
-  if ((candidate.users?.length ?? 0) > 1) return true;
-  if (candidate.roles && candidate.roles.length !== SEED_STATE.roles.length) return true;
-  if (candidate.branding?.logoUrl) return true;
-  if (candidate.branding?.appName && candidate.branding.appName !== SEED_STATE.branding.appName) return true;
-  if (candidate.branding?.tagline && candidate.branding.tagline !== SEED_STATE.branding.tagline) return true;
-  if (
-    candidate.branding?.defaultCertificateBg &&
-    candidate.branding.defaultCertificateBg !== DEFAULT_CERT_BG &&
-    candidate.branding.defaultCertificateBg !== LEGACY_DEFAULT_CERT_BG
-  ) {
-    return true;
-  }
-  return false;
-}
-
-function mergeById<T extends { id: string }>(primary: T[] = [], secondary: T[] = []): T[] {
-  const seen = new Set(primary.map((item) => item.id));
-  const merged = [...primary];
-  for (const item of secondary) {
-    if (!seen.has(item.id)) {
-      seen.add(item.id);
-      merged.push(item);
-    }
-  }
-  return merged;
-}
 
 function buildHydratedState(prev: AppState, incoming: Partial<AppState>): AppState {
   const savedCertBg = incoming.branding?.defaultCertificateBg;
@@ -105,52 +62,8 @@ function buildHydratedState(prev: AppState, incoming: Partial<AppState>): AppSta
   };
 }
 
-function mergeWorkspaceStates(local: AppState, remote: Partial<AppState>): AppState {
-  const mergedBranding: BrandingSettings = {
-    ...SEED_STATE.branding,
-    ...(remote.branding ?? {}),
-    ...local.branding,
-    logoUrl: local.branding.logoUrl || remote.branding?.logoUrl || '',
-    defaultCertificateBg:
-      local.branding.defaultCertificateBg && local.branding.defaultCertificateBg !== LEGACY_DEFAULT_CERT_BG
-        ? local.branding.defaultCertificateBg
-        : remote.branding?.defaultCertificateBg && remote.branding.defaultCertificateBg !== LEGACY_DEFAULT_CERT_BG
-          ? remote.branding.defaultCertificateBg
-          : DEFAULT_CERT_BG,
-  };
-
-  const mergedUsers = mergeById(local.users, remote.users);
-  const validCurrentUserId = mergedUsers.some((u) => u.id === local.currentUserId)
-    ? local.currentUserId
-    : mergedUsers[0]?.id ?? local.currentUserId;
-
-  return {
-    ...clone(SEED_STATE),
-    ...remote,
-    ...local,
-    branding: mergedBranding,
-    roles: mergeById(local.roles, remote.roles),
-    positions: mergeById(local.positions, remote.positions),
-    users: mergedUsers,
-    onboardingItems: mergeById(local.onboardingItems, remote.onboardingItems),
-    announcements: mergeById(local.announcements, remote.announcements),
-    customers: mergeById(local.customers, remote.customers),
-    vendors: mergeById(local.vendors, remote.vendors),
-    products: mergeById(local.products, remote.products),
-    projects: mergeById(local.projects, remote.projects),
-    tasks: mergeById(local.tasks, remote.tasks),
-    projectUpdates: mergeById(local.projectUpdates, remote.projectUpdates),
-    filterPresets: mergeById(local.filterPresets, remote.filterPresets),
-    courses: mergeById(local.courses, remote.courses),
-    enrollments: mergeById(local.enrollments, remote.enrollments),
-    auditLogs: mergeById(local.auditLogs, remote.auditLogs),
-    isAuthenticated: local.isAuthenticated,
-    currentUserId: validCurrentUserId,
-  };
-}
-
 function serializeForCloud(s: AppState): Json {
-  const { isAuthenticated: _ignoredAuth, auditLogs, ...rest } = s;
+  const { isAuthenticated: _ignoredAuth, currentUserId: _ignoredUser, auditLogs, ...rest } = s;
   const trimmedAudits = (auditLogs ?? []).slice(0, 40).map((log) => ({
     ...log,
     before: log.before
@@ -188,6 +101,7 @@ interface AppContextValue {
   toasts: ToastMessage[];
   dismissToast: (id: string) => void;
   notify: (title: string, type?: ToastMessage['type']) => void;
+  isCloudHydrating: boolean;
   cloudStatus: CloudSyncStatus;
   lastCloudSyncAt: string | null;
   pushLocalToCloud: () => Promise<boolean>;
@@ -295,6 +209,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
+  const [isCloudHydrating, setIsCloudHydrating] = useState<boolean>(() => Boolean(supabase));
   const [cloudStatus, setCloudStatus] = useState<CloudSyncStatus>(() =>
     supabase ? 'connecting' : 'offline'
   );
@@ -303,185 +218,247 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const stateRef = useRef(state);
   stateRef.current = state;
 
-  // Cloud sync: safely migrate local data on first connect, or hydrate from shared workspace_state
   const cloudReady = useRef(false);
-  const skipNextCloudSave = useRef(false);
   const pendingSave = useRef(false);
+  const isSavingRef = useRef(false);
+  const lastSavedPayloadRef = useRef<string | null>(null);
   const remoteUpdatedAt = useRef<string | null>(null);
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  const persistWorkspaceSnapshot = useCallback(
+    async (snapshot: AppState, options?: { force?: boolean; silentError?: boolean }): Promise<boolean> => {
+      const client = supabase;
+      if (!client) return false;
+
+      const payload = serializeForCloud(snapshot);
+      const payloadJson = JSON.stringify(payload);
+
+      if (!options?.force && payloadJson === lastSavedPayloadRef.current) {
+        pendingSave.current = false;
+        return true;
+      }
+
+      if (payloadJson.length > MAX_CLOUD_PAYLOAD_BYTES) {
+        pendingSave.current = false;
+        setCloudStatus('error');
+        if (!options?.silentError) {
+          notify('Save failed: embedded media exceeds 5.5 MB database limit. Use smaller files or external URLs.', 'error');
+        }
+        return false;
+      }
+
+      isSavingRef.current = true;
+      const nowIso = new Date().toISOString();
+      try {
+        const { data: savedRow, error } = await client
+          .from('workspace_state')
+          .upsert({ id: 'main', data: payload, updated_at: nowIso })
+          .select('updated_at')
+          .maybeSingle();
+
+        if (error) {
+          console.error('Cloud save failed', error);
+          setCloudStatus('error');
+          if (!options?.silentError) {
+            notify('Failed to save changes to database. Retrying...', 'error');
+          }
+          return false;
+        }
+
+        const confirmedAt = savedRow?.updated_at ?? nowIso;
+        lastSavedPayloadRef.current = payloadJson;
+        pendingSave.current = false;
+        remoteUpdatedAt.current = confirmedAt;
+        setLastCloudSyncAt(confirmedAt);
+        setCloudStatus('synced');
+        return true;
+      } catch (err) {
+        console.error('Unexpected cloud save error', err);
+        setCloudStatus('error');
+        if (!options?.silentError) {
+          notify('Network error while saving changes to database.', 'error');
+        }
+        return false;
+      } finally {
+        isSavingRef.current = false;
+      }
+    },
+    [notify]
+  );
+
+  // Hydrate exclusively from Supabase workspace_state ('main') on initial load
   useEffect(() => {
-    if (!supabase) {
+    const client = supabase;
+    if (!client) {
       setCloudStatus('offline');
+      setIsCloudHydrating(false);
       return;
     }
 
     let cancelled = false;
-    (async () => {
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const hydrate = async (attempt: number) => {
       try {
-        const { data, error } = await supabase
+        const { data, error } = await client
           .from('workspace_state')
           .select('data, updated_at')
           .eq('id', 'main')
           .maybeSingle();
 
         if (cancelled) return;
+
         if (error) {
           console.error('Cloud load failed', error);
           setCloudStatus('error');
+          setIsCloudHydrating(false);
+          if (attempt === 1) {
+            notify('Could not reach database on startup. Retrying...', 'error');
+            retryTimer = setTimeout(() => {
+              if (!cancelled && !cloudReady.current) {
+                void hydrate(2);
+              }
+            }, 2500);
+          }
           return;
         }
 
-        const localSnapshot = stateRef.current;
-        const remoteData = (data?.data ?? null) as Partial<AppState> | null;
-        const remoteHasData = hasCustomWorkspaceData(remoteData);
-        const localHasData = hasCustomWorkspaceData(localSnapshot);
-        const projectId = (import.meta.env.VITE_SUPABASE_PROJECT_ID as string | undefined) || 'default';
-        const alreadyMigrated = localStorage.getItem(CLOUD_MIGRATION_KEY) === projectId;
-
-        if (localHasData && !remoteHasData) {
-          const nowIso = new Date().toISOString();
-          const { error: upsertError } = await supabase.from('workspace_state').upsert({
-            id: 'main',
-            data: serializeForCloud(localSnapshot),
-            updated_at: nowIso,
-          });
+        if (!data || !data.data || Object.keys(data.data as Record<string, unknown>).length === 0) {
+          const seeded = clone(SEED_STATE);
+          const ok = await persistWorkspaceSnapshot(seeded, { force: true });
           if (cancelled) return;
-          if (upsertError) {
-            console.error('Cloud migration upsert failed', upsertError);
-            setCloudStatus('error');
-          } else {
-            localStorage.setItem(CLOUD_MIGRATION_KEY, projectId);
-            setLastCloudSyncAt(nowIso);
-            setCloudStatus('synced');
-            notify('Migrated local workspace data to cloud database');
+          if (ok) {
+            cloudReady.current = true;
           }
-        } else if (localHasData && remoteHasData && !alreadyMigrated && remoteData) {
-          const merged = mergeWorkspaceStates(localSnapshot, remoteData);
-          const nowIso = new Date().toISOString();
-          skipNextCloudSave.current = true;
-          setState(merged);
-          const { error: upsertError } = await supabase.from('workspace_state').upsert({
-            id: 'main',
-            data: serializeForCloud(merged),
-            updated_at: nowIso,
-          });
-          if (cancelled) return;
-          if (upsertError) {
-            console.error('Cloud merge upsert failed', upsertError);
-            setCloudStatus('error');
-          } else {
-            localStorage.setItem(CLOUD_MIGRATION_KEY, projectId);
-            setLastCloudSyncAt(nowIso);
-            setCloudStatus('synced');
-            notify('Merged and synced workspace data with cloud database');
-          }
-        } else if (remoteHasData && remoteData) {
-          skipNextCloudSave.current = true;
-          setState((prev) => buildHydratedState(prev, remoteData));
-          localStorage.setItem(CLOUD_MIGRATION_KEY, projectId);
-          setLastCloudSyncAt(data?.updated_at ?? new Date().toISOString());
-          setCloudStatus('synced');
-        } else {
-          localStorage.setItem(CLOUD_MIGRATION_KEY, projectId);
-          setLastCloudSyncAt(data?.updated_at ?? null);
-          setCloudStatus('synced');
+          setIsCloudHydrating(false);
+          return;
         }
 
+        const remoteData = data.data as Partial<AppState>;
+        const hydrated = buildHydratedState(stateRef.current, remoteData);
+        lastSavedPayloadRef.current = JSON.stringify(serializeForCloud(hydrated));
+        remoteUpdatedAt.current = data.updated_at ?? null;
+        pendingSave.current = false;
+        setState(hydrated);
+        setLastCloudSyncAt(data.updated_at ?? null);
+        setCloudStatus('synced');
         cloudReady.current = true;
+        setIsCloudHydrating(false);
       } catch (err) {
         if (cancelled) return;
         console.error('Unexpected cloud sync error', err);
         setCloudStatus('error');
+        setIsCloudHydrating(false);
       }
-    })();
+    };
+
+    void hydrate(1);
 
     return () => {
       cancelled = true;
+      if (retryTimer) clearTimeout(retryTimer);
     };
-  }, [notify]);
+  }, [notify, persistWorkspaceSnapshot]);
 
+  // Rapid debounced cloud save whenever state mutates after hydration
   useEffect(() => {
     const client = supabase;
     if (!client || !cloudReady.current) return;
-    if (skipNextCloudSave.current) {
-      skipNextCloudSave.current = false;
+
+    const payloadJson = JSON.stringify(serializeForCloud(state));
+    if (payloadJson === lastSavedPayloadRef.current) {
       return;
     }
 
-    const t = setTimeout(() => {
-      const nowIso = new Date().toISOString();
-      client
-        .from('workspace_state')
-        .upsert({ id: 'main', data: serializeForCloud(state), updated_at: nowIso })
-        .then(({ error }) => {
-          if (error) {
-            console.error('Cloud save failed', error);
-            setCloudStatus('error');
-          } else {
-            pendingSave.current = false;
-            setLastCloudSyncAt(nowIso);
-            setCloudStatus('synced');
-          }
-        });
-    }, 800);
-
     pendingSave.current = true;
-    return () => clearTimeout(t);
-  }, [state]);
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
 
-  // Flush pending save immediately when leaving/hiding the page
+    saveTimerRef.current = setTimeout(() => {
+      saveTimerRef.current = null;
+      void persistWorkspaceSnapshot(stateRef.current);
+    }, 150);
+
+    return () => {
+      if (saveTimerRef.current) {
+        clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
+      }
+    };
+  }, [state, persistWorkspaceSnapshot]);
+
   useEffect(() => {
     if (lastCloudSyncAt) remoteUpdatedAt.current = lastCloudSyncAt;
   }, [lastCloudSyncAt]);
 
+  // Flush pending saves & guard page reload while a save is still in flight
   useEffect(() => {
     const client = supabase;
     if (!client) return;
+
     const flush = () => {
       if (!pendingSave.current || !cloudReady.current) return;
-      pendingSave.current = false;
-      const nowIso = new Date().toISOString();
-      client
-        .from('workspace_state')
-        .upsert({ id: 'main', data: serializeForCloud(stateRef.current), updated_at: nowIso })
-        .then(({ error }) => {
-          if (error) { pendingSave.current = true; console.error('Cloud flush failed', error); }
-          else setLastCloudSyncAt(nowIso);
-        });
+      if (saveTimerRef.current) {
+        clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
+      }
+      void persistWorkspaceSnapshot(stateRef.current, { silentError: true });
     };
-    // Pull newer data saved from other devices/tabs
+
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (pendingSave.current || isSavingRef.current) {
+        flush();
+        e.preventDefault();
+        e.returnValue = '';
+      }
+    };
+
     const refresh = async () => {
-      if (!cloudReady.current || pendingSave.current) return;
+      if (!cloudReady.current || pendingSave.current || isSavingRef.current) return;
       const { data, error } = await client
         .from('workspace_state')
         .select('data, updated_at')
         .eq('id', 'main')
         .maybeSingle();
-      if (error || !data || pendingSave.current) return;
+      if (error || !data?.data || pendingSave.current || isSavingRef.current) return;
+      if (data.updated_at && data.updated_at === remoteUpdatedAt.current) return;
+
       const remoteTs = data.updated_at ? new Date(data.updated_at).getTime() : 0;
       const localTs = remoteUpdatedAt.current ? new Date(remoteUpdatedAt.current).getTime() : 0;
-      if (remoteTs > localTs + 1 && hasCustomWorkspaceData(data.data as Partial<AppState>)) {
-        skipNextCloudSave.current = true;
-        setState((prev) => buildHydratedState(prev, data.data as Partial<AppState>));
+      if (remoteTs > localTs + 1000) {
+        const hydrated = buildHydratedState(stateRef.current, data.data as Partial<AppState>);
+        lastSavedPayloadRef.current = JSON.stringify(serializeForCloud(hydrated));
+        remoteUpdatedAt.current = data.updated_at;
+        setState(hydrated);
         setLastCloudSyncAt(data.updated_at);
         setCloudStatus('synced');
       }
     };
+
     const onVisibility = () => {
       if (document.visibilityState === 'hidden') flush();
-      else refresh();
+      else void refresh();
     };
-    window.addEventListener('beforeunload', flush);
+
+    const onFocus = () => {
+      void refresh();
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    window.addEventListener('pagehide', flush);
     document.addEventListener('visibilitychange', onVisibility);
-    window.addEventListener('focus', refresh);
-    const interval = setInterval(refresh, 15000);
+    window.addEventListener('focus', onFocus);
+    const interval = setInterval(() => {
+      void refresh();
+    }, 15000);
+
     return () => {
-      window.removeEventListener('beforeunload', flush);
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      window.removeEventListener('pagehide', flush);
       document.removeEventListener('visibilitychange', onVisibility);
-      window.removeEventListener('focus', refresh);
+      window.removeEventListener('focus', onFocus);
       clearInterval(interval);
     };
-  }, []);
+  }, [persistWorkspaceSnapshot]);
 
   const pushLocalToCloud = useCallback(async (): Promise<boolean> => {
     if (!supabase) {
@@ -489,26 +466,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return false;
     }
     setCloudStatus('connecting');
-    const nowIso = new Date().toISOString();
-    const { error } = await supabase.from('workspace_state').upsert({
-      id: 'main',
-      data: serializeForCloud(stateRef.current),
-      updated_at: nowIso,
-    });
-    if (error) {
-      console.error('Manual cloud push failed', error);
-      setCloudStatus('error');
-      notify('Failed to push local data to database.', 'error');
-      return false;
-    }
-    const projectId = (import.meta.env.VITE_SUPABASE_PROJECT_ID as string | undefined) || 'default';
-    localStorage.setItem(CLOUD_MIGRATION_KEY, projectId);
+    const ok = await persistWorkspaceSnapshot(stateRef.current, { force: true });
+    if (!ok) return false;
     cloudReady.current = true;
-    setLastCloudSyncAt(nowIso);
-    setCloudStatus('synced');
-    notify('Workspace data migrated to cloud database');
+    notify('Workspace data saved to cloud database');
     return true;
-  }, [notify]);
+  }, [notify, persistWorkspaceSnapshot]);
 
   const pullCloudToLocal = useCallback(async (): Promise<boolean> => {
     if (!supabase) {
@@ -535,8 +498,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return false;
     }
 
-    skipNextCloudSave.current = true;
-    setState((prev) => buildHydratedState(prev, remoteData));
+    const hydrated = buildHydratedState(stateRef.current, remoteData);
+    lastSavedPayloadRef.current = JSON.stringify(serializeForCloud(hydrated));
+    remoteUpdatedAt.current = data?.updated_at ?? null;
+    pendingSave.current = false;
+    setState(hydrated);
     cloudReady.current = true;
     setLastCloudSyncAt(data?.updated_at ?? new Date().toISOString());
     setCloudStatus('synced');
@@ -672,15 +638,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     fresh.isAuthenticated = true;
     setState(fresh);
     if (supabase) {
-      const nowIso = new Date().toISOString();
-      await supabase.from('workspace_state').upsert({
-        id: 'main',
-        data: serializeForCloud(fresh),
-        updated_at: nowIso,
-      });
+      const ok = await persistWorkspaceSnapshot(fresh, { force: true });
+      if (ok) {
+        cloudReady.current = true;
+        notify('Demo data restored to Supabase database defaults', 'info');
+      }
+      return;
     }
-    notify('Demo data restored to Supabase database defaults', 'info');
-  }, [notify]);
+    notify('Demo data restored to defaults', 'info');
+  }, [notify, persistWorkspaceSnapshot]);
 
   // Roles
   const createRole = useCallback(
@@ -2661,6 +2627,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     toasts,
     dismissToast,
     notify,
+    isCloudHydrating,
     cloudStatus,
     lastCloudSyncAt,
     pushLocalToCloud,

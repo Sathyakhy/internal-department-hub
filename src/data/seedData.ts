@@ -228,6 +228,8 @@ export const SEED_STATE: AppState = {
       prerequisiteCourseIds: [],
       completionRule: 'Both',
       autoAssignNewJoiners: true,
+      assignedUserIds: [],
+      assignedDepartments: [],
       certificateBgOverride: '',
       createdAt: '2026-11-01T00:00:00.000Z',
       modules: [
