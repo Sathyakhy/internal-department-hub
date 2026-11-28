@@ -652,6 +652,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const resetDemoData = useCallback(async () => {
     const fresh = clone(SEED_STATE);
     fresh.isAuthenticated = true;
+    writeSessionUserId(fresh.currentUserId);
     setState(fresh);
     if (supabase) {
       const ok = await persistWorkspaceSnapshot(fresh, { force: true });
