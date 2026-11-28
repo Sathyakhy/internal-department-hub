@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { CloudDownload, CloudUpload, Moon, RotateCcw, Save, Sun } from 'lucide-react';
+import { Moon, Save, Sun } from 'lucide-react';
 import { DEFAULT_CERT_BG } from '../../data/seedData';
 import { useAppStore } from '../../store/useAppStore';
 import { ImageUploadField } from '../common/ImageUploadField';
@@ -10,13 +10,9 @@ export const SettingsView: React.FC = () => {
     canEdit,
     updateBranding,
     toggleTheme,
-    resetDemoData,
-    pushLocalToCloud,
-    pullCloudToLocal,
     notify,
   } = useAppStore();
   const editable = canEdit('settings');
-  const [syncBusy, setSyncBusy] = useState<'push' | 'pull' | null>(null);
 
   const [form, setForm] = useState({
     appName: state.branding.appName,
@@ -35,8 +31,6 @@ export const SettingsView: React.FC = () => {
       defaultCertificateBg: state.branding.defaultCertificateBg,
     });
   }, [state.branding]);
-
-  const [confirmReset, setConfirmReset] = useState(false);
 
   const handleSave = (e: React.FormEvent) => {
     e.preventDefault();
@@ -186,96 +180,6 @@ export const SettingsView: React.FC = () => {
               )}
             </button>
           </div>
-
-          <div className="pt-4 border-t border-neutral-100 dark:border-zinc-800 flex items-center justify-between gap-3">
-            <div>
-              <h3 className="text-sm font-display font-semibold text-neutral-900 dark:text-neutral-100">
-                Reset Workspace Data
-              </h3>
-              <p className="text-xs text-neutral-500 dark:text-neutral-400">
-                Clears created items and restores the clean Administrator baseline.
-              </p>
-            </div>
-            {!confirmReset ? (
-              <button
-                type="button"
-                onClick={() => setConfirmReset(true)}
-                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-red-300 text-red-600 dark:border-red-900 dark:text-red-400 text-xs font-medium hover:bg-red-50 dark:hover:bg-red-950/30 whitespace-nowrap"
-              >
-                <RotateCcw className="h-3.5 w-3.5" />
-                Reset Workspace
-              </button>
-            ) : (
-              <div className="flex items-center gap-1.5">
-                <button
-                  type="button"
-                  onClick={() => {
-                    resetDemoData();
-                    setForm({
-                      appName: 'Department OS',
-                      tagline: 'eCam Solution · Internal Workspace',
-                      heroText:
-                        'Sign in with your eCam Solution credentials to manage operations, projects, and team enablement.',
-                      logoUrl: '',
-                      defaultCertificateBg: DEFAULT_CERT_BG,
-                    });
-                    setConfirmReset(false);
-                  }}
-                  className="px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-500 text-white text-xs font-medium"
-                >
-                  Confirm Reset
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setConfirmReset(false)}
-                  className="px-2.5 py-1.5 rounded-lg border border-neutral-200 dark:border-zinc-800 text-xs"
-                >
-                  Cancel
-                </button>
-              </div>
-            )}
-          </div>
-
-          {editable && (
-            <div className="pt-4 border-t border-neutral-100 dark:border-zinc-800 space-y-3">
-              <div>
-                <h3 className="text-sm font-display font-semibold text-neutral-900 dark:text-neutral-100">
-                  Cloud Database Sync
-                </h3>
-                <p className="text-xs text-neutral-500 dark:text-neutral-400">
-                  Local data migrates automatically on load. You can also manually push or reload the shared workspace record.
-                </p>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  disabled={syncBusy !== null}
-                  onClick={async () => {
-                    setSyncBusy('push');
-                    await pushLocalToCloud();
-                    setSyncBusy(null);
-                  }}
-                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-xs font-medium disabled:opacity-50 whitespace-nowrap"
-                >
-                  <CloudUpload className="h-3.5 w-3.5" />
-                  <span>{syncBusy === 'push' ? 'Migrating...' : 'Migrate Local Data to DB'}</span>
-                </button>
-                <button
-                  type="button"
-                  disabled={syncBusy !== null}
-                  onClick={async () => {
-                    setSyncBusy('pull');
-                    await pullCloudToLocal();
-                    setSyncBusy(null);
-                  }}
-                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-neutral-200 dark:border-zinc-800 hover:bg-neutral-50 dark:hover:bg-zinc-900 text-neutral-700 dark:text-neutral-200 text-xs font-medium disabled:opacity-50 whitespace-nowrap"
-                >
-                  <CloudDownload className="h-3.5 w-3.5" />
-                  <span>{syncBusy === 'pull' ? 'Loading...' : 'Reload from DB'}</span>
-                </button>
-              </div>
-            </div>
-          )}
         </div>
       </div>
     </div>

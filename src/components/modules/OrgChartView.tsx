@@ -7,43 +7,96 @@ import {
   FileText,
   Mail,
   MapPin,
+  Maximize2,
   Minus,
   Phone,
   Plus,
-  RotateCcw,
   UserCheck,
   Users,
   X,
 } from 'lucide-react';
 import { useAppStore } from '../../store/useAppStore';
 import { Position, User } from '../../types';
+import { compareUsersByRankAndJoinDate, sortUsersByRankAndJoinDate } from '../../utils/orgSort';
 import { UserAvatar } from '../common/UserAvatar';
 
-const CARD_WIDTH = 224;
-const CARD_HEIGHT = 96;
-const H_GAP = 32;
-const V_GAP = 64;
-const CANVAS_PAD_X = 64;
-const BANNER_HEIGHT = 104;
-const CANVAS_PAD_BOTTOM = 64;
+const PHOTO_SIZE = 116;
+const NODE_WIDTH = 184;
+const NODE_HEIGHT = 188;
+const PHOTO_INSET_X = (NODE_WIDTH - PHOTO_SIZE) / 2; // 34px
+
+const H_GAP = 40;
+const V_GAP_TOP = 64;
+const V_GAP_CHAIN = 30;
+const STACK_INDENT = 36;
+const RAIL_GAP = 36;
+
+const CANVAS_PAD_X = 72;
+const BANNER_HEIGHT = 128;
+const CANVAS_PAD_BOTTOM = 72;
+
+const MIN_ZOOM = 0.25;
+const MAX_ZOOM = 2.5;
 
 interface TreeNode {
   user: User;
   position: Position | undefined;
   children: TreeNode[];
+  depth: number;
+  relLeft: number;
+  relRight: number;
   subtreeWidth: number;
+  subtreeHeight: number;
   x: number;
   y: number;
 }
 
-interface PositionedEdge {
-  id: string;
-  fromX: number;
-  fromY: number;
-  toX: number;
-  toY: number;
-  kind: 'manager' | 'mentor';
-  mentorName?: string;
+type EdgeSpec =
+  | {
+      id: string;
+      kind: 'orthogonal-down';
+      fromX: number;
+      fromY: number;
+      midY: number;
+      toX: number;
+      toY: number;
+    }
+  | {
+      id: string;
+      kind: 'straight-down';
+      x: number;
+      fromY: number;
+      toY: number;
+    }
+  | {
+      id: string;
+      kind: 'chain-spine';
+      x: number;
+      fromY: number;
+      toY: number;
+    }
+  | {
+      id: string;
+      kind: 'chain-branch';
+      fromX: number;
+      toX: number;
+      y: number;
+    }
+  | {
+      id: string;
+      kind: 'mentor';
+      fromX: number;
+      fromY: number;
+      toX: number;
+      toY: number;
+      mentorName: string;
+    };
+
+function getInitials(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return '?';
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return `${parts[0][0]}${parts[parts.length - 1][0]}`.toUpperCase();
 }
 
 function buildOrgLayout(users: User[], positions: Position[]) {
@@ -51,7 +104,7 @@ function buildOrgLayout(users: User[], positions: Position[]) {
   if (activeUsers.length === 0) {
     return {
       nodes: [] as TreeNode[],
-      edges: [] as PositionedEdge[],
+      edges: [] as EdgeSpec[],
       width: 0,
       height: 0,
       nodeMap: new Map<string, TreeNode>(),
@@ -74,16 +127,9 @@ function buildOrgLayout(users: User[], positions: Position[]) {
       if (pathSet.has(curr.id)) {
         const cycleStartIdx = path.indexOf(curr.id);
         const cycleIds = path.slice(cycleStartIdx);
-        cycleIds.sort((aId, bId) => {
-          const ua = activeMap.get(aId)!;
-          const ub = activeMap.get(bId)!;
-          const pa = posMap.get(ua.positionId)?.priorityLevel ?? 0;
-          const pb = posMap.get(ub.positionId)?.priorityLevel ?? 0;
-          if (pb !== pa) return pb - pa;
-          const sd = ua.startDate.localeCompare(ub.startDate);
-          if (sd !== 0) return sd;
-          return ua.fullName.localeCompare(ub.fullName);
-        });
+        cycleIds.sort((aId, bId) =>
+          compareUsersByRankAndJoinDate(activeMap.get(aId)!, activeMap.get(bId)!, posMap)
+        );
         brokenCycleRoots.add(cycleIds[0]);
         break;
       }
@@ -111,82 +157,122 @@ function buildOrgLayout(users: User[], positions: Position[]) {
     childrenMap.set(mgrId, list);
   }
 
-  const sortSiblings = (siblings: User[]): User[] => {
-    const groups = new Map<string, { title: string; maxPriority: number; users: User[] }>();
-    for (const u of siblings) {
-      const pos = posMap.get(u.positionId);
-      const title = pos?.title ?? 'Unassigned Position';
-      const priority = pos?.priorityLevel ?? 0;
-      const g = groups.get(title) ?? { title, maxPriority: priority, users: [] };
-      g.maxPriority = Math.max(g.maxPriority, priority);
-      g.users.push(u);
-      groups.set(title, g);
-    }
+  const sortSiblings = (siblings: User[]): User[] =>
+    [...siblings].sort((a, b) => compareUsersByRankAndJoinDate(a, b, posMap));
 
-    const sortedUsersInGroup = (arr: User[]) =>
-      [...arr].sort((a, b) => {
-        const pa = posMap.get(a.positionId)?.priorityLevel ?? 0;
-        const pb = posMap.get(b.positionId)?.priorityLevel ?? 0;
-        if (pb !== pa) return pb - pa;
-        const sd = a.startDate.localeCompare(b.startDate);
-        if (sd !== 0) return sd;
-        return a.fullName.localeCompare(b.fullName);
-      });
-
-    const sortedGroups = Array.from(groups.values())
-      .map((g) => ({ ...g, users: sortedUsersInGroup(g.users) }))
-      .sort((a, b) => {
-        if (b.maxPriority !== a.maxPriority) return b.maxPriority - a.maxPriority;
-        const earliestA = a.users[0]?.startDate ?? '';
-        const earliestB = b.users[0]?.startDate ?? '';
-        const sd = earliestA.localeCompare(earliestB);
-        if (sd !== 0) return sd;
-        return a.title.localeCompare(b.title);
-      });
-
-    return sortedGroups.flatMap((g) => g.users);
-  };
-
+  // Build nodes & measure bounds bottom-up:
+  // - Depth 0 (roots) fan out Depth 1 children horizontally left-to-right.
+  // - Depth >= 1 nodes stack their direct reports vertically below them continuously.
   const buildNode = (u: User, depth: number, visitedInBranch: Set<string>): TreeNode => {
     visitedInBranch.add(u.id);
     const rawKids = (childrenMap.get(u.id) ?? []).filter((k) => !visitedInBranch.has(k.id));
     const orderedKids = sortSiblings(rawKids);
     const children = orderedKids.map((k) => buildNode(k, depth + 1, new Set(visitedInBranch)));
 
-    const childrenWidth =
-      children.length > 0
-        ? children.reduce((sum, c) => sum + c.subtreeWidth, 0) + H_GAP * (children.length - 1)
-        : 0;
-    const subtreeWidth = Math.max(CARD_WIDTH, childrenWidth);
+    if (depth === 0) {
+      const childrenWidth =
+        children.length > 0
+          ? children.reduce((sum, c) => sum + c.subtreeWidth, 0) + H_GAP * (children.length - 1)
+          : 0;
+      const subtreeWidth = Math.max(NODE_WIDTH, childrenWidth);
+      const maxChildHeight = children.reduce((m, c) => Math.max(m, c.subtreeHeight), 0);
+      const subtreeHeight =
+        children.length > 0 ? NODE_HEIGHT + V_GAP_TOP + maxChildHeight : NODE_HEIGHT;
+
+      return {
+        user: u,
+        position: posMap.get(u.positionId),
+        children,
+        depth,
+        relLeft: 0,
+        relRight: subtreeWidth,
+        subtreeWidth,
+        subtreeHeight,
+        x: 0,
+        y: BANNER_HEIGHT,
+      };
+    }
+
+    // Depth >= 1: vertical continuous sub-team stacking
+    if (children.length === 0) {
+      return {
+        user: u,
+        position: posMap.get(u.positionId),
+        children,
+        depth,
+        relLeft: 0,
+        relRight: NODE_WIDTH,
+        subtreeWidth: NODE_WIDTH,
+        subtreeHeight: NODE_HEIGHT,
+        x: 0,
+        y: 0,
+      };
+    }
+
+    const useRail = children.length >= 2;
+    const childIndent = useRail ? STACK_INDENT : 0;
+    let relLeft = 0;
+    let relRight = NODE_WIDTH;
+    let totalHeight = NODE_HEIGHT;
+
+    for (const child of children) {
+      relLeft = Math.min(relLeft, childIndent + child.relLeft);
+      relRight = Math.max(relRight, childIndent + child.relRight);
+      totalHeight += V_GAP_CHAIN + child.subtreeHeight;
+    }
 
     return {
       user: u,
       position: posMap.get(u.positionId),
       children,
-      subtreeWidth,
+      depth,
+      relLeft,
+      relRight,
+      subtreeWidth: relRight - relLeft,
+      subtreeHeight: totalHeight,
       x: 0,
-      y: BANNER_HEIGHT + depth * (CARD_HEIGHT + V_GAP),
+      y: 0,
     };
   };
 
   const rootUsers = sortSiblings(childrenMap.get(null) ?? []);
   const rootNodes = rootUsers.map((r) => buildNode(r, 0, new Set()));
 
-  const assignPositions = (node: TreeNode, startX: number) => {
-    if (node.children.length === 0) {
-      node.x = startX + (node.subtreeWidth - CARD_WIDTH) / 2;
+  const assignVerticalPositions = (node: TreeNode, nodeX: number, nodeY: number) => {
+    node.x = nodeX;
+    node.y = nodeY;
+    if (node.children.length === 0) return;
+
+    const useRail = node.children.length >= 2;
+    const childX = nodeX + (useRail ? STACK_INDENT : 0);
+    let cursorY = nodeY + NODE_HEIGHT + V_GAP_CHAIN;
+
+    for (const child of node.children) {
+      assignVerticalPositions(child, childX, cursorY);
+      cursorY += child.subtreeHeight + V_GAP_CHAIN;
+    }
+  };
+
+  const assignRootPositions = (root: TreeNode, startX: number) => {
+    root.y = BANNER_HEIGHT;
+    if (root.children.length === 0) {
+      root.x = startX + (root.subtreeWidth - NODE_WIDTH) / 2;
       return;
     }
+
     const totalKidsWidth =
-      node.children.reduce((sum, c) => sum + c.subtreeWidth, 0) + H_GAP * (node.children.length - 1);
-    let cursorX = startX + (node.subtreeWidth - totalKidsWidth) / 2;
-    for (const child of node.children) {
-      assignPositions(child, cursorX);
+      root.children.reduce((sum, c) => sum + c.subtreeWidth, 0) + H_GAP * (root.children.length - 1);
+    let cursorX = startX + (root.subtreeWidth - totalKidsWidth) / 2;
+    const childY = BANNER_HEIGHT + NODE_HEIGHT + V_GAP_TOP;
+
+    for (const child of root.children) {
+      assignVerticalPositions(child, cursorX - child.relLeft, childY);
       cursorX += child.subtreeWidth + H_GAP;
     }
-    const firstChildCenter = node.children[0].x + CARD_WIDTH / 2;
-    const lastChildCenter = node.children[node.children.length - 1].x + CARD_WIDTH / 2;
-    node.x = (firstChildCenter + lastChildCenter) / 2 - CARD_WIDTH / 2;
+
+    const firstChildCenter = root.children[0].x + NODE_WIDTH / 2;
+    const lastChildCenter = root.children[root.children.length - 1].x + NODE_WIDTH / 2;
+    root.x = (firstChildCenter + lastChildCenter) / 2 - NODE_WIDTH / 2;
   };
 
   const totalRootsWidth =
@@ -194,33 +280,92 @@ function buildOrgLayout(users: User[], positions: Position[]) {
 
   let rootCursor = CANVAS_PAD_X;
   for (const r of rootNodes) {
-    assignPositions(r, rootCursor);
+    assignRootPositions(r, rootCursor);
     rootCursor += r.subtreeWidth + H_GAP;
   }
 
   const flatNodes: TreeNode[] = [];
   const nodeMap = new Map<string, TreeNode>();
-  let maxBottom = BANNER_HEIGHT + CARD_HEIGHT;
+  let maxBottom = BANNER_HEIGHT + NODE_HEIGHT;
 
   const collect = (node: TreeNode) => {
     flatNodes.push(node);
     nodeMap.set(node.user.id, node);
-    maxBottom = Math.max(maxBottom, node.y + CARD_HEIGHT);
+    maxBottom = Math.max(maxBottom, node.y + NODE_HEIGHT);
     for (const c of node.children) collect(c);
   };
   for (const r of rootNodes) collect(r);
 
-  const edges: PositionedEdge[] = [];
+  const edges: EdgeSpec[] = [];
+
   for (const node of flatNodes) {
-    for (const child of node.children) {
+    if (node.children.length === 0) continue;
+
+    if (node.depth === 0) {
+      const fromX = node.x + NODE_WIDTH / 2;
+      const fromY = node.y + NODE_HEIGHT + 4;
+      const midY = fromY + 22;
+
+      for (const child of node.children) {
+        const toX = child.x + NODE_WIDTH / 2;
+        const toY = child.y;
+        if (Math.abs(fromX - toX) < 0.5) {
+          edges.push({
+            id: `mgr-${node.user.id}-${child.user.id}`,
+            kind: 'straight-down',
+            x: fromX,
+            fromY,
+            toY,
+          });
+        } else {
+          edges.push({
+            id: `mgr-${node.user.id}-${child.user.id}`,
+            kind: 'orthogonal-down',
+            fromX,
+            fromY,
+            midY,
+            toX,
+            toY,
+          });
+        }
+      }
+      continue;
+    }
+
+    // Depth >= 1: vertical chain connectors
+    if (node.children.length === 1) {
+      const child = node.children[0];
       edges.push({
         id: `mgr-${node.user.id}-${child.user.id}`,
-        fromX: node.x + CARD_WIDTH / 2,
-        fromY: node.y + CARD_HEIGHT,
-        toX: child.x + CARD_WIDTH / 2,
+        kind: 'straight-down',
+        x: node.x + NODE_WIDTH / 2,
+        fromY: node.y + NODE_HEIGHT + 4,
         toY: child.y,
-        kind: 'manager',
       });
+    } else {
+      const firstChildPhotoLeft = node.children[0].x + PHOTO_INSET_X;
+      const railX = firstChildPhotoLeft - RAIL_GAP;
+      const railStartY = node.y + NODE_HEIGHT + 6;
+      const lastChild = node.children[node.children.length - 1];
+      const railEndY = lastChild.y + PHOTO_SIZE / 2;
+
+      edges.push({
+        id: `spine-${node.user.id}`,
+        kind: 'chain-spine',
+        x: railX,
+        fromY: railStartY,
+        toY: railEndY,
+      });
+
+      for (const child of node.children) {
+        edges.push({
+          id: `mgr-${node.user.id}-${child.user.id}`,
+          kind: 'chain-branch',
+          fromX: railX,
+          toX: child.x + PHOTO_INSET_X,
+          y: child.y + PHOTO_SIZE / 2,
+        });
+      }
     }
   }
 
@@ -230,11 +375,11 @@ function buildOrgLayout(users: User[], positions: Position[]) {
       const mentorNode = nodeMap.get(mentorId)!;
       edges.push({
         id: `mnt-${mentorNode.user.id}-${node.user.id}`,
-        fromX: mentorNode.x + CARD_WIDTH / 2,
-        fromY: mentorNode.y + CARD_HEIGHT,
-        toX: node.x + CARD_WIDTH / 2,
-        toY: node.y,
         kind: 'mentor',
+        fromX: mentorNode.x + NODE_WIDTH / 2,
+        fromY: mentorNode.y + NODE_HEIGHT,
+        toX: node.x + NODE_WIDTH / 2,
+        toY: node.y,
         mentorName: mentorNode.user.fullName,
       });
     }
@@ -243,26 +388,62 @@ function buildOrgLayout(users: User[], positions: Position[]) {
   return {
     nodes: flatNodes,
     edges,
-    width: Math.max(820, totalRootsWidth + CANVAS_PAD_X * 2),
+    width: Math.max(960, totalRootsWidth + CANVAS_PAD_X * 2),
     height: maxBottom + CANVAS_PAD_BOTTOM,
     nodeMap,
   };
 }
 
-function buildOrthogonalPath(edge: PositionedEdge, indexOffset: number): string {
-  if (edge.kind === 'manager') {
-    const midY = edge.fromY + (edge.toY - edge.fromY) / 2;
-    return `M ${edge.fromX} ${edge.fromY} L ${edge.fromX} ${midY} L ${edge.toX} ${midY} L ${edge.toX} ${edge.toY}`;
-  }
-  const sameRow = Math.abs(edge.fromY - edge.toY) < CARD_HEIGHT + 10;
-  if (sameRow) {
-    const dipY = Math.max(edge.fromY, edge.toY) + 24 + (indexOffset % 3) * 10;
-    const targetBottomY = edge.toY + CARD_HEIGHT;
-    return `M ${edge.fromX} ${edge.fromY} L ${edge.fromX} ${dipY} L ${edge.toX} ${dipY} L ${edge.toX} ${targetBottomY}`;
-  }
-  const midY = edge.fromY + (edge.toY - edge.fromY) * 0.35 + (indexOffset % 3) * 8;
-  return `M ${edge.fromX} ${edge.fromY} L ${edge.fromX} ${midY} L ${edge.toX} ${midY} L ${edge.toX} ${edge.toY}`;
+interface PortraitFrameProps {
+  name: string;
+  avatarUrl?: string;
+  forcedLight: boolean;
 }
+
+const PortraitFrame: React.FC<PortraitFrameProps> = ({ name, avatarUrl, forcedLight }) => {
+  const [imgError, setImgError] = useState(false);
+
+  useEffect(() => {
+    setImgError(false);
+  }, [avatarUrl]);
+
+  const borderCls = forcedLight
+    ? 'border-blue-600 bg-white'
+    : 'border-blue-600 dark:border-blue-500 bg-white dark:bg-zinc-900';
+
+  if (avatarUrl && !imgError) {
+    return (
+      <div
+        style={{ width: PHOTO_SIZE, height: PHOTO_SIZE }}
+        className={`mx-auto rounded-2xl border-2 overflow-hidden shadow-xs shrink-0 ${borderCls}`}
+      >
+        <img
+          key={avatarUrl}
+          src={avatarUrl}
+          alt={name}
+          referrerPolicy="no-referrer"
+          onError={() => setImgError(true)}
+          className="w-full h-full object-cover select-none"
+          draggable={false}
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div
+      style={{ width: PHOTO_SIZE, height: PHOTO_SIZE }}
+      aria-label={name}
+      className={`mx-auto rounded-2xl border-2 flex items-center justify-center shadow-xs shrink-0 select-none ${
+        forcedLight
+          ? 'border-blue-600 bg-blue-50 text-blue-700'
+          : 'border-blue-600 dark:border-blue-500 bg-blue-50 dark:bg-blue-950/60 text-blue-700 dark:text-blue-200'
+      }`}
+    >
+      <span className="text-2xl font-display font-bold tracking-tight">{getInitials(name)}</span>
+    </div>
+  );
+};
 
 export const OrgChartView: React.FC = () => {
   const { state, notify } = useAppStore();
@@ -277,6 +458,7 @@ export const OrgChartView: React.FC = () => {
   const [zoom, setZoom] = useState<number>(0.9);
   const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [isPanning, setIsPanning] = useState(false);
+  const [showMentorship, setShowMentorship] = useState(false);
   const [selectedUserId, setSelectedUserId] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
 
@@ -287,59 +469,96 @@ export const OrgChartView: React.FC = () => {
     panY: number;
     moved: boolean;
   } | null>(null);
-  const hasCenteredRef = useRef(false);
+  const hasInitializedRef = useRef(false);
 
-  const computeCenteredState = useCallback(() => {
+  const computeFitState = useCallback(() => {
     const vp = viewportRef.current;
     if (!vp || layout.width === 0 || layout.height === 0) {
       return { z: 1, x: 0, y: 0 };
     }
     const vw = vp.clientWidth;
     const vh = vp.clientHeight;
-    const fitScale = Math.min((vw - 48) / layout.width, (vh - 48) / layout.height, 1);
-    const clampedZoom = Math.max(0.1, Math.min(2.0, Number(fitScale.toFixed(2))));
+    const fitScale = Math.min((vw - 48) / layout.width, (vh - 48) / layout.height, 1.15);
+    const clampedZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, Number(fitScale.toFixed(2))));
     const centeredX = (vw - layout.width * clampedZoom) / 2;
     const centeredY = Math.max(16, (vh - layout.height * clampedZoom) / 2);
     return { z: clampedZoom, x: centeredX, y: centeredY };
   }, [layout.width, layout.height]);
 
-  const resetView = useCallback(() => {
-    const { z, x, y } = computeCenteredState();
+  const computeInitialReadableState = useCallback(() => {
+    const vp = viewportRef.current;
+    if (!vp || layout.width === 0 || layout.height === 0) {
+      return { z: 0.9, x: 0, y: 16 };
+    }
+    const vw = vp.clientWidth;
+    const vh = vp.clientHeight;
+    const fitScale = Math.min((vw - 48) / layout.width, (vh - 48) / layout.height, 1.05);
+    // Keep initial view large and legible while letting users fit or zoom out anytime
+    const initialZoom = Math.max(0.78, Math.min(1.05, Number(fitScale.toFixed(2))));
+    const centeredX = (vw - layout.width * initialZoom) / 2;
+    const topOrCenteredY =
+      layout.height * initialZoom <= vh - 32
+        ? (vh - layout.height * initialZoom) / 2
+        : 16;
+    return { z: initialZoom, x: centeredX, y: topOrCenteredY };
+  }, [layout.width, layout.height]);
+
+  const fitView = useCallback(() => {
+    const { z, x, y } = computeFitState();
     setZoom(z);
     setPan({ x, y });
-  }, [computeCenteredState]);
+  }, [computeFitState]);
+
+  const setExactZoom = useCallback(
+    (targetZoom: number) => {
+      const nextZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, Number(targetZoom.toFixed(2))));
+      const vp = viewportRef.current;
+      if (!vp) {
+        setZoom(nextZoom);
+        return;
+      }
+      const cx = vp.clientWidth / 2;
+      const cy = vp.clientHeight / 2;
+      setZoom((prevZoom) => {
+        if (prevZoom === nextZoom) return prevZoom;
+        const ratio = nextZoom / prevZoom;
+        setPan((prevPan) => ({
+          x: cx - (cx - prevPan.x) * ratio,
+          y: cy - (cy - prevPan.y) * ratio,
+        }));
+        return nextZoom;
+      });
+    },
+    []
+  );
 
   useEffect(() => {
-    if (!hasCenteredRef.current && layout.nodes.length > 0) {
-      hasCenteredRef.current = true;
-      resetView();
+    if (!hasInitializedRef.current && layout.nodes.length > 0) {
+      hasInitializedRef.current = true;
+      const { z, x, y } = computeInitialReadableState();
+      setZoom(z);
+      setPan({ x, y });
     }
-  }, [layout.nodes.length, resetView]);
+  }, [layout.nodes.length, computeInitialReadableState]);
 
-  const applyCenterAnchoredZoom = useCallback((nextZoomRaw: number) => {
-    const nextZoom = Math.max(0.1, Math.min(2.0, Number(nextZoomRaw.toFixed(2))));
+  const handleWheel = (e: React.WheelEvent) => {
+    e.preventDefault();
     const vp = viewportRef.current;
+    const delta = e.deltaY < 0 ? 0.1 : -0.1;
+    const nextZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, Number((zoom + delta).toFixed(2))));
     if (!vp) {
       setZoom(nextZoom);
       return;
     }
-    const cx = vp.clientWidth / 2;
-    const cy = vp.clientHeight / 2;
-    setZoom((prevZoom) => {
-      if (prevZoom === nextZoom) return prevZoom;
-      const ratio = nextZoom / prevZoom;
-      setPan((prevPan) => ({
-        x: cx - (cx - prevPan.x) * ratio,
-        y: cy - (cy - prevPan.y) * ratio,
-      }));
-      return nextZoom;
-    });
-  }, []);
-
-  const handleWheel = (e: React.WheelEvent) => {
-    e.preventDefault();
-    const delta = e.deltaY < 0 ? 0.1 : -0.1;
-    applyCenterAnchoredZoom(zoom + delta);
+    const rect = vp.getBoundingClientRect();
+    const anchorX = e.clientX - rect.left;
+    const anchorY = e.clientY - rect.top;
+    const ratio = nextZoom / zoom;
+    setZoom(nextZoom);
+    setPan((prevPan) => ({
+      x: anchorX - (anchorX - prevPan.x) * ratio,
+      y: anchorY - (anchorY - prevPan.y) * ratio,
+    }));
   };
 
   const handlePointerDown = (e: React.PointerEvent) => {
@@ -379,15 +598,26 @@ export const OrgChartView: React.FC = () => {
     }
   };
 
-  // High-resolution 2x full-bounds export on forced #FFFFFF light theme
   const captureChartAsJpegDataUrl = async (): Promise<string | null> => {
     if (!exportRef.current) return null;
+    const imgs = Array.from(exportRef.current.querySelectorAll('img'));
+    await Promise.all(
+      imgs.map((img) =>
+        img.complete
+          ? Promise.resolve()
+          : new Promise<void>((resolve) => {
+              img.onload = () => resolve();
+              img.onerror = () => resolve();
+            })
+      )
+    );
     return toJpeg(exportRef.current, {
       quality: 0.96,
       pixelRatio: 2,
       backgroundColor: '#FFFFFF',
       width: layout.width,
       height: layout.height,
+      skipFonts: true,
     });
   };
 
@@ -447,6 +677,14 @@ export const OrgChartView: React.FC = () => {
     [state.users, selectedUserId]
   );
 
+  const selectedDirectReports = useMemo(() => {
+    if (!selectedUser) return [];
+    return sortUsersByRankAndJoinDate(
+      state.users.filter((u) => u.isActive && u.managerId === selectedUser.id),
+      state.positions
+    );
+  }, [selectedUser, state.users, state.positions]);
+
   if (layout.nodes.length === 0) {
     return (
       <div className="rounded-xl border border-neutral-200 dark:border-zinc-800 bg-white dark:bg-[#0A0A0C] p-12 text-center">
@@ -462,88 +700,149 @@ export const OrgChartView: React.FC = () => {
   }
 
   const renderTreeScene = (forcedLight: boolean) => {
-    const mentorEdges = layout.edges.filter((e) => e.kind === 'mentor');
-    const managerEdges = layout.edges.filter((e) => e.kind === 'manager');
+    const mentorEdges = showMentorship ? layout.edges.filter((e) => e.kind === 'mentor') : [];
+    const structureEdges = layout.edges.filter((e) => e.kind !== 'mentor');
+    const lineStroke = forcedLight ? '#2563EB' : '#3B82F6';
 
     return (
       <div
         style={{ width: layout.width, height: layout.height }}
         className={`relative select-none ${
-          forcedLight ? 'bg-white text-neutral-900' : 'bg-transparent text-neutral-900 dark:text-neutral-100'
+          forcedLight ? 'bg-white text-slate-900' : 'bg-transparent text-slate-900 dark:text-slate-100'
         }`}
       >
-        {/* Canvas Title Banner + Legend */}
+        {/* Top Centered "Department Structure" Banner with Flanking Horizontal Rules */}
         <div
-          className={`absolute top-4 left-8 right-8 h-16 px-6 rounded-xl border flex items-center justify-between gap-6 ${
-            forcedLight
-              ? 'bg-neutral-50 border-neutral-200 text-neutral-900'
-              : 'bg-white/95 dark:bg-[#0A0A0C]/95 border-neutral-200 dark:border-zinc-800'
-          }`}
+          style={{ left: 48, right: 48, top: 24, height: 76 }}
+          className="absolute flex items-center gap-6"
         >
-          <div>
-            <h2 className="text-base font-display font-bold tracking-tight">
-              Department Structure
-            </h2>
-            <p className={`text-xs ${forcedLight ? 'text-neutral-500' : 'text-neutral-500 dark:text-neutral-400'}`}>
-              {state.branding.appName} · {layout.nodes.length} Active Staff · Live Hierarchy
-            </p>
-          </div>
-
-          <div className="flex items-center gap-5 text-xs shrink-0">
-            <div className="flex items-center gap-2">
-              <span
-                className={`inline-block w-6 h-0.5 ${
-                  forcedLight ? 'bg-neutral-600' : 'bg-neutral-500 dark:bg-zinc-500'
-                }`}
-              />
-              <span className={forcedLight ? 'text-neutral-700' : 'text-neutral-600 dark:text-neutral-300'}>
-                Direct Reports
-              </span>
+          <div className={`flex-1 h-[2px] ${forcedLight ? 'bg-blue-600' : 'bg-blue-600 dark:bg-blue-500'}`} />
+          <div
+            className={`px-8 py-3 rounded-xl text-center shadow-sm shrink-0 ${
+              forcedLight ? 'bg-blue-600 text-white' : 'bg-blue-600 dark:bg-blue-500 text-white'
+            }`}
+          >
+            <div className="text-[15px] font-display font-semibold leading-tight tracking-tight">
+              Department
             </div>
-            <div className="flex items-center gap-2">
-              <span className="inline-block w-6 border-t-2 border-dashed border-sky-600 dark:border-sky-400" />
-              <span className={forcedLight ? 'text-neutral-700' : 'text-neutral-600 dark:text-neutral-300'}>
-                Mentorship Pair
-              </span>
+            <div className="text-[15px] font-display font-semibold leading-tight tracking-tight">
+              Structure
             </div>
           </div>
+          <div className={`flex-1 h-[2px] ${forcedLight ? 'bg-blue-600' : 'bg-blue-600 dark:bg-blue-500'}`} />
         </div>
 
-        {/* SVG Orthogonal Connectors */}
+        {/* SVG Hierarchy Lines & Arrowheads */}
         <svg
           width={layout.width}
           height={layout.height}
           className="absolute inset-0 pointer-events-none"
         >
-          {managerEdges.map((edge, idx) => (
-            <path
-              key={edge.id}
-              d={buildOrthogonalPath(edge, idx)}
-              fill="none"
-              stroke={forcedLight ? '#525252' : '#71717A'}
-              strokeWidth={1.75}
-              strokeLinejoin="round"
-            />
-          ))}
-          {mentorEdges.map((edge, idx) => (
-            <path
-              key={edge.id}
-              d={buildOrthogonalPath(edge, idx)}
-              fill="none"
-              stroke="#0284C7"
-              strokeWidth={1.75}
-              strokeDasharray="6 4"
-              strokeLinejoin="round"
-            />
-          ))}
+          {structureEdges.map((edge) => {
+            if (edge.kind === 'orthogonal-down') {
+              const lineEndY = edge.toY - 8;
+              return (
+                <g key={edge.id}>
+                  <path
+                    d={`M ${edge.fromX} ${edge.fromY} L ${edge.fromX} ${edge.midY} L ${edge.toX} ${edge.midY} L ${edge.toX} ${lineEndY}`}
+                    fill="none"
+                    stroke={lineStroke}
+                    strokeWidth={1.75}
+                    strokeLinejoin="round"
+                  />
+                  <polygon
+                    points={`${edge.toX},${edge.toY - 1} ${edge.toX - 4.5},${edge.toY - 9} ${edge.toX + 4.5},${edge.toY - 9}`}
+                    fill={lineStroke}
+                  />
+                </g>
+              );
+            }
+
+            if (edge.kind === 'straight-down') {
+              const lineEndY = edge.toY - 8;
+              return (
+                <g key={edge.id}>
+                  <line
+                    x1={edge.x}
+                    y1={edge.fromY}
+                    x2={edge.x}
+                    y2={lineEndY}
+                    stroke={lineStroke}
+                    strokeWidth={1.75}
+                  />
+                  <polygon
+                    points={`${edge.x},${edge.toY - 1} ${edge.x - 4.5},${edge.toY - 9} ${edge.x + 4.5},${edge.toY - 9}`}
+                    fill={lineStroke}
+                  />
+                </g>
+              );
+            }
+
+            if (edge.kind === 'chain-spine') {
+              return (
+                <line
+                  key={edge.id}
+                  x1={edge.x}
+                  y1={edge.fromY}
+                  x2={edge.x}
+                  y2={edge.toY}
+                  stroke={lineStroke}
+                  strokeWidth={1.75}
+                />
+              );
+            }
+
+            if (edge.kind === 'chain-branch') {
+              const lineEndX = edge.toX - 8;
+              return (
+                <g key={edge.id}>
+                  <line
+                    x1={edge.fromX}
+                    y1={edge.y}
+                    x2={lineEndX}
+                    y2={edge.y}
+                    stroke={lineStroke}
+                    strokeWidth={1.75}
+                  />
+                  <polygon
+                    points={`${edge.toX - 1},${edge.y} ${edge.toX - 9},${edge.y - 4.5} ${edge.toX - 9},${edge.y + 4.5}`}
+                    fill={lineStroke}
+                  />
+                </g>
+              );
+            }
+
+            return null;
+          })}
+
+          {mentorEdges.map((edge, idx) => {
+            if (edge.kind !== 'mentor') return null;
+            const sameRow = Math.abs(edge.fromY - edge.toY) < NODE_HEIGHT + 16;
+            const pathD = sameRow
+              ? `M ${edge.fromX} ${edge.fromY} L ${edge.fromX} ${Math.max(edge.fromY, edge.toY) + 20 + (idx % 3) * 8} L ${edge.toX} ${Math.max(edge.fromY, edge.toY) + 20 + (idx % 3) * 8} L ${edge.toX} ${edge.toY + NODE_HEIGHT}`
+              : `M ${edge.fromX} ${edge.fromY} L ${edge.fromX} ${edge.fromY + (edge.toY - edge.fromY) * 0.35 + (idx % 3) * 8} L ${edge.toX} ${edge.fromY + (edge.toY - edge.fromY) * 0.35 + (idx % 3) * 8} L ${edge.toX} ${edge.toY}`;
+            return (
+              <path
+                key={edge.id}
+                d={pathD}
+                fill="none"
+                stroke="#0284C7"
+                strokeWidth={1.5}
+                strokeDasharray="6 4"
+                strokeLinejoin="round"
+              />
+            );
+          })}
         </svg>
 
-        {/* Person Cards */}
+        {/* Portrait Person Nodes */}
         {layout.nodes.map((node) => {
-          const mentorUser = node.user.mentorId
-            ? state.users.find((u) => u.id === node.user.mentorId && u.isActive)
-            : undefined;
-          const isMentoringSomeone = mentorEdges.some((e) => e.mentorName === node.user.fullName);
+          const mentorUser =
+            showMentorship && node.user.mentorId
+              ? state.users.find((u) => u.id === node.user.mentorId && u.isActive)
+              : undefined;
+          const isMentoringSomeone =
+            showMentorship && mentorEdges.some((e) => e.kind === 'mentor' && e.mentorName === node.user.fullName);
           const roleTitle =
             node.position?.title ??
             (node.user.roleIds.includes('role-admin') ? 'Administrator' : 'Staff Member');
@@ -557,43 +856,41 @@ export const OrgChartView: React.FC = () => {
               style={{
                 left: node.x,
                 top: node.y,
-                width: CARD_WIDTH,
-                height: CARD_HEIGHT,
+                width: NODE_WIDTH,
+                minHeight: NODE_HEIGHT,
               }}
-              className={`absolute text-left rounded-xl border p-3.5 transition-all flex items-center gap-3 ${
-                forcedLight
-                  ? 'bg-white border-neutral-300 text-neutral-900 shadow-sm'
-                  : 'bg-white dark:bg-[#0A0A0C] border-neutral-200 dark:border-zinc-800 hover:border-sky-500 dark:hover:border-sky-500 shadow-sm hover:shadow-md cursor-pointer'
+              className={`group absolute flex flex-col items-center text-center focus-visible:outline-none ${
+                forcedLight ? '' : 'cursor-pointer transition-transform duration-150 hover:-translate-y-0.5'
               }`}
             >
-              <UserAvatar name={node.user.fullName} avatarUrl={node.user.avatarUrl} size="md" />
-              <div className="min-w-0 flex-1">
+              <PortraitFrame
+                name={node.user.fullName}
+                avatarUrl={node.user.avatarUrl}
+                forcedLight={forcedLight}
+              />
+
+              <div className="mt-2.5 w-full px-1">
                 <div
-                  className={`text-sm font-display font-semibold truncate ${
-                    forcedLight ? 'text-neutral-900' : 'text-neutral-900 dark:text-neutral-100'
+                  className={`text-[14.5px] font-display font-bold leading-snug tracking-tight break-words ${
+                    forcedLight
+                      ? 'text-slate-900'
+                      : 'text-slate-900 dark:text-slate-100 group-hover:text-blue-600 dark:group-hover:text-blue-400'
                   }`}
                 >
                   {node.user.fullName}
                 </div>
                 <div
-                  className={`text-xs truncate mt-0.5 ${
-                    forcedLight ? 'text-neutral-600' : 'text-neutral-500 dark:text-neutral-400'
+                  className={`mt-0.5 text-[12px] leading-snug break-words line-clamp-2 ${
+                    forcedLight ? 'text-slate-500' : 'text-slate-500 dark:text-slate-400'
                   }`}
                 >
                   {roleTitle}
                 </div>
-                {(mentorUser || isMentoringSomeone) && (
-                  <div className="mt-1.5 flex items-center gap-1.5">
-                    {mentorUser && (
-                      <span className="inline-flex items-center rounded border border-sky-200 dark:border-sky-500/30 bg-sky-50 dark:bg-sky-500/10 px-1.5 py-0.5 text-[10px] font-medium text-sky-700 dark:text-sky-400">
-                        Mentee
-                      </span>
-                    )}
-                    {isMentoringSomeone && (
-                      <span className="inline-flex items-center rounded border border-amber-200 dark:border-amber-500/30 bg-amber-50 dark:bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-400">
-                        Mentor
-                      </span>
-                    )}
+                {showMentorship && (mentorUser || isMentoringSomeone) && (
+                  <div className="mt-1 text-[10.5px] font-medium text-sky-600 dark:text-sky-400">
+                    {[isMentoringSomeone ? 'Mentor' : '', mentorUser ? 'Mentee' : '']
+                      .filter(Boolean)
+                      .join(' · ')}
                   </div>
                 )}
               </div>
@@ -611,8 +908,8 @@ export const OrgChartView: React.FC = () => {
         <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
-            onClick={() => applyCenterAnchoredZoom(zoom - 0.1)}
-            disabled={zoom <= 0.1}
+            onClick={() => setExactZoom(zoom - 0.15)}
+            disabled={zoom <= MIN_ZOOM}
             className="p-1.5 rounded-lg border border-neutral-200 dark:border-zinc-800 text-neutral-700 dark:text-neutral-200 hover:bg-neutral-50 dark:hover:bg-zinc-900 disabled:opacity-40"
             aria-label="Zoom out"
           >
@@ -621,12 +918,12 @@ export const OrgChartView: React.FC = () => {
 
           <input
             type="range"
-            min={10}
-            max={200}
+            min={Math.round(MIN_ZOOM * 100)}
+            max={Math.round(MAX_ZOOM * 100)}
             step={5}
             value={Math.round(zoom * 100)}
-            onChange={(e) => applyCenterAnchoredZoom(Number(e.target.value) / 100)}
-            className="w-24 sm:w-32 accent-sky-600"
+            onChange={(e) => setExactZoom(Number(e.target.value) / 100)}
+            className="w-24 sm:w-36 accent-blue-600"
             aria-label="Zoom percentage slider"
           />
 
@@ -636,8 +933,8 @@ export const OrgChartView: React.FC = () => {
 
           <button
             type="button"
-            onClick={() => applyCenterAnchoredZoom(zoom + 0.1)}
-            disabled={zoom >= 2.0}
+            onClick={() => setExactZoom(zoom + 0.15)}
+            disabled={zoom >= MAX_ZOOM}
             className="p-1.5 rounded-lg border border-neutral-200 dark:border-zinc-800 text-neutral-700 dark:text-neutral-200 hover:bg-neutral-50 dark:hover:bg-zinc-900 disabled:opacity-40"
             aria-label="Zoom in"
           >
@@ -646,11 +943,32 @@ export const OrgChartView: React.FC = () => {
 
           <button
             type="button"
-            onClick={resetView}
-            className="ml-1 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-neutral-200 dark:border-zinc-800 text-xs font-medium text-neutral-700 dark:text-neutral-200 hover:bg-neutral-50 dark:hover:bg-zinc-900 whitespace-nowrap"
+            onClick={() => setExactZoom(1)}
+            className="ml-1 px-2.5 py-1.5 rounded-lg border border-neutral-200 dark:border-zinc-800 text-xs font-mono-tabular font-medium text-neutral-700 dark:text-neutral-200 hover:bg-neutral-50 dark:hover:bg-zinc-900 whitespace-nowrap"
           >
-            <RotateCcw className="h-3.5 w-3.5" />
-            Reset View
+            100%
+          </button>
+
+          <button
+            type="button"
+            onClick={fitView}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-neutral-200 dark:border-zinc-800 text-xs font-medium text-neutral-700 dark:text-neutral-200 hover:bg-neutral-50 dark:hover:bg-zinc-900 whitespace-nowrap"
+          >
+            <Maximize2 className="h-3.5 w-3.5" />
+            <span>Fit View</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setShowMentorship((prev) => !prev)}
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium whitespace-nowrap transition-colors ${
+              showMentorship
+                ? 'border-sky-600 bg-sky-50 dark:bg-sky-500/15 text-sky-700 dark:text-sky-300'
+                : 'border-neutral-200 dark:border-zinc-800 text-neutral-700 dark:text-neutral-200 hover:bg-neutral-50 dark:hover:bg-zinc-900'
+            }`}
+          >
+            <UserCheck className="h-3.5 w-3.5" />
+            <span>Mentorship Lines</span>
           </button>
         </div>
 
@@ -661,14 +979,14 @@ export const OrgChartView: React.FC = () => {
             onClick={handleExportJpeg}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-neutral-200 dark:border-zinc-800 text-xs font-medium text-neutral-700 dark:text-neutral-200 hover:bg-neutral-50 dark:hover:bg-zinc-900 disabled:opacity-50 whitespace-nowrap"
           >
-            <FileImage className="h-3.5 w-3.5 text-sky-600 dark:text-sky-400" />
+            <FileImage className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400" />
             <span>{exporting ? 'Exporting...' : 'Export JPEG'}</span>
           </button>
           <button
             type="button"
             disabled={exporting}
             onClick={handleExportPdf}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-700 text-white text-xs font-medium disabled:opacity-50 whitespace-nowrap"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-medium disabled:opacity-50 whitespace-nowrap"
           >
             <Download className="h-3.5 w-3.5" />
             <span>{exporting ? 'Exporting...' : 'Export PDF'}</span>
@@ -676,7 +994,7 @@ export const OrgChartView: React.FC = () => {
         </div>
       </div>
 
-      {/* Interactive Pan/Zoom Canvas */}
+      {/* Large Interactive Pan/Zoom Canvas */}
       <div
         ref={viewportRef}
         onWheel={handleWheel}
@@ -684,13 +1002,13 @@ export const OrgChartView: React.FC = () => {
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
         onPointerCancel={handlePointerUp}
-        className={`relative w-full h-[640px] rounded-xl border border-neutral-200 dark:border-zinc-800 bg-neutral-50 dark:bg-black overflow-hidden touch-none ${
+        className={`relative w-full h-[calc(100vh-205px)] min-h-[680px] rounded-xl border border-neutral-200 dark:border-zinc-800 bg-white dark:bg-[#050507] overflow-hidden touch-none ${
           isPanning ? 'cursor-grabbing' : 'cursor-grab'
         }`}
         style={{
           backgroundImage:
-            'radial-gradient(circle, rgba(161, 161, 170, 0.2) 1px, transparent 1px)',
-          backgroundSize: '20px 20px',
+            'radial-gradient(circle, rgba(148, 163, 184, 0.16) 1px, transparent 1px)',
+          backgroundSize: '24px 24px',
         }}
       >
         <div
@@ -701,6 +1019,10 @@ export const OrgChartView: React.FC = () => {
           className="absolute top-0 left-0"
         >
           {renderTreeScene(false)}
+        </div>
+
+        <div className="pointer-events-none absolute bottom-3 left-4 text-[11px] text-neutral-400 dark:text-neutral-500">
+          Drag to move · Scroll to zoom · Click a portrait for profile details
         </div>
       </div>
 
@@ -718,7 +1040,7 @@ export const OrgChartView: React.FC = () => {
           <div className="relative z-10 w-full max-w-md bg-white dark:bg-[#0A0A0C] border-l border-neutral-200 dark:border-zinc-800 h-full flex flex-col shadow-2xl">
             <div className="px-6 py-4 border-b border-neutral-200 dark:border-zinc-800 flex items-center justify-between">
               <div className="flex items-center gap-2 text-sm font-display font-semibold text-neutral-900 dark:text-neutral-100">
-                <FileText className="h-4 w-4 text-sky-600 dark:text-sky-400" />
+                <FileText className="h-4 w-4 text-blue-600 dark:text-blue-400" />
                 <span>Staff Quick-View</span>
               </div>
               <button
@@ -738,7 +1060,7 @@ export const OrgChartView: React.FC = () => {
                   <h3 className="text-lg font-display font-bold text-neutral-900 dark:text-neutral-100">
                     {selectedUser.fullName}
                   </h3>
-                  <p className="text-sm font-medium text-sky-600 dark:text-sky-400">
+                  <p className="text-sm font-medium text-blue-600 dark:text-blue-400">
                     {state.positions.find((p) => p.id === selectedUser.positionId)?.title ??
                       (selectedUser.roleIds.includes('role-admin') ? 'Administrator' : 'Staff Member')}
                   </p>
@@ -795,19 +1117,17 @@ export const OrgChartView: React.FC = () => {
                 <div>
                   <span className="text-neutral-500 dark:text-neutral-400">Direct Reports:</span>
                   <div className="mt-1.5 flex flex-wrap gap-1.5">
-                    {state.users
-                      .filter((u) => u.isActive && u.managerId === selectedUser.id)
-                      .map((rep) => (
-                        <button
-                          key={rep.id}
-                          type="button"
-                          onClick={() => setSelectedUserId(rep.id)}
-                          className="px-2.5 py-1 rounded-md border border-neutral-200 dark:border-zinc-800 hover:border-sky-500 text-neutral-700 dark:text-neutral-200"
-                        >
-                          {rep.fullName}
-                        </button>
-                      ))}
-                    {state.users.filter((u) => u.isActive && u.managerId === selectedUser.id).length === 0 && (
+                    {selectedDirectReports.map((rep) => (
+                      <button
+                        key={rep.id}
+                        type="button"
+                        onClick={() => setSelectedUserId(rep.id)}
+                        className="px-2.5 py-1 rounded-md border border-neutral-200 dark:border-zinc-800 hover:border-blue-500 text-neutral-700 dark:text-neutral-200"
+                      >
+                        {rep.fullName}
+                      </button>
+                    ))}
+                    {selectedDirectReports.length === 0 && (
                       <span className="text-neutral-400">No direct reports</span>
                     )}
                   </div>

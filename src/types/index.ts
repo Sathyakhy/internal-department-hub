@@ -33,6 +33,20 @@ export interface Position {
   description: string;
 }
 
+export type PositionHistoryChangeType = 'Initial Role' | 'Promotion' | 'Transfer' | 'Role Change';
+
+export interface PositionHistoryEntry {
+  id: string;
+  positionId?: string;
+  title: string;
+  department: string;
+  changeType: PositionHistoryChangeType;
+  startDate: string; // YYYY-MM-DD
+  endDate: string | null; // null when isCurrent is true
+  isCurrent: boolean;
+  notes?: string;
+}
+
 export interface User {
   id: string;
   fullName: string;
@@ -51,6 +65,7 @@ export interface User {
   isNewJoiner: boolean;
   roleIds: string[];
   onboardingCompletedIds: string[];
+  positionHistory?: PositionHistoryEntry[];
 }
 
 export interface OnboardingChecklistItem {

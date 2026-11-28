@@ -3,6 +3,7 @@ import { Briefcase, Edit2, Plus, Trash2, X } from 'lucide-react';
 import { useAppStore } from '../../store/useAppStore';
 import { Position } from '../../types';
 import { downloadExcelTemplate } from '../../utils/excel';
+import { sortPositionsByRank } from '../../utils/orgSort';
 import { ExcelImportActions } from '../common/ExcelImportActions';
 
 export const PositionsCatalogView: React.FC = () => {
@@ -18,7 +19,7 @@ export const PositionsCatalogView: React.FC = () => {
     description: '',
   });
 
-  const sorted = [...state.positions].sort((a, b) => b.priorityLevel - a.priorityLevel);
+  const sorted = sortPositionsByRank(state.positions);
 
   const openCreate = () => {
     setEditing(null);

@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react';
-import { AlertTriangle, ArrowRight, Calendar, Megaphone, Pin } from 'lucide-react';
+import { AlertTriangle, ArrowRight, Calendar, Megaphone, Pin, Users } from 'lucide-react';
 import { useAppStore } from '../../store/useAppStore';
 import { ModuleId } from '../../types';
 import { isTaskOverdue } from '../../utils/rbac';
@@ -85,10 +85,54 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     [state.enrollments, currentUser.id]
   );
 
+  const activeStaff = useMemo(() => state.users.filter((u) => u.isActive), [state.users]);
+  const inactiveCount = state.users.length - activeStaff.length;
+  const newJoinerCount = useMemo(
+    () => activeStaff.filter((u) => u.isNewJoiner).length,
+    [activeStaff]
+  );
+
+  const departmentHeadcount = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const u of activeStaff) {
+      const dept = u.department?.trim() || 'General';
+      counts.set(dept, (counts.get(dept) ?? 0) + 1);
+    }
+    return Array.from(counts.entries())
+      .map(([department, count]) => ({
+        department,
+        count,
+        pct: activeStaff.length > 0 ? Math.round((count / activeStaff.length) * 100) : 0,
+      }))
+      .sort((a, b) => (b.count !== a.count ? b.count - a.count : a.department.localeCompare(b.department)));
+  }, [activeStaff]);
+
   return (
     <div className="space-y-6">
       {/* Top KPI Strip */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4">
+        <button
+          type="button"
+          onClick={() => canView('staff') && onNavigateModule('staff')}
+          disabled={!canView('staff')}
+          className={`text-left rounded-xl border border-neutral-200 dark:border-zinc-800 bg-white dark:bg-[#0A0A0C] p-4 transition-colors ${
+            canView('staff') ? 'hover:border-sky-400 dark:hover:border-sky-500/60 cursor-pointer' : ''
+          }`}
+        >
+          <div className="flex items-center justify-between gap-2 text-xs font-medium text-neutral-500 dark:text-neutral-400">
+            <span>Staff Headcount</span>
+            <Users className="h-3.5 w-3.5 text-sky-600 dark:text-sky-400 shrink-0" />
+          </div>
+          <div className="mt-1.5 flex items-baseline justify-between gap-2">
+            <span className="text-2xl font-display font-bold tabular-nums text-neutral-900 dark:text-neutral-100">
+              {activeStaff.length}
+            </span>
+            <span className="text-xs text-neutral-500 dark:text-neutral-400 tabular-nums">
+              {departmentHeadcount.length} {departmentHeadcount.length === 1 ? 'dept' : 'depts'}
+            </span>
+          </div>
+        </button>
+
         <div className="rounded-xl border border-neutral-200 dark:border-zinc-800 bg-white dark:bg-[#0A0A0C] p-4">
           <div className="text-xs font-medium text-neutral-500 dark:text-neutral-400">Assigned Tasks</div>
           <div className="mt-1.5 flex items-baseline justify-between">
@@ -299,70 +343,131 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </section>
         </div>
 
-        {/* Right: Pinned Announcements Feed */}
-        <section className="lg:col-span-4 rounded-xl border border-neutral-200 dark:border-zinc-800 bg-white dark:bg-[#0A0A0C] overflow-hidden">
-          <div className="px-5 py-4 border-b border-neutral-200 dark:border-zinc-800 flex items-center justify-between gap-3">
-            <div className="flex items-center gap-2">
-              <Megaphone className="h-4 w-4 text-amber-500" />
-              <h2 className="text-base font-display font-semibold text-neutral-900 dark:text-neutral-100">
-                Pinned Announcements
-              </h2>
+        {/* Right: Department Headcount Summary + Pinned Announcements Feed */}
+        <div className="lg:col-span-4 space-y-6">
+          <section className="rounded-xl border border-neutral-200 dark:border-zinc-800 bg-white dark:bg-[#0A0A0C] overflow-hidden">
+            <div className="px-5 py-4 border-b border-neutral-200 dark:border-zinc-800 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <Users className="h-4 w-4 text-sky-600 dark:text-sky-400" />
+                <h2 className="text-base font-display font-semibold text-neutral-900 dark:text-neutral-100">
+                  Headcount by Department
+                </h2>
+              </div>
+              {canView('staff') && (
+                <button
+                  type="button"
+                  onClick={() => onNavigateModule('staff')}
+                  className="text-xs font-medium text-sky-600 dark:text-sky-400 hover:underline whitespace-nowrap"
+                >
+                  Directory
+                </button>
+              )}
             </div>
-            {canView('announcements') && (
-              <button
-                type="button"
-                onClick={() => onNavigateModule('announcements')}
-                className="text-xs font-medium text-sky-600 dark:text-sky-400 hover:underline whitespace-nowrap"
-              >
-                Manage
-              </button>
-            )}
-          </div>
 
-          {pinnedAnnouncements.length > 0 ? (
-            <div className="divide-y divide-neutral-100 dark:divide-zinc-800/80">
-              {pinnedAnnouncements.map((ann) => {
-                const author = state.users.find((u) => u.id === ann.authorId);
-                return (
-                  <article key={ann.id} className="p-5">
-                    <div className="flex items-center justify-between gap-2 text-xs text-neutral-500 dark:text-neutral-400">
-                      <span className="inline-flex items-center gap-1 font-medium text-amber-600 dark:text-amber-400">
-                        <Pin className="h-3 w-3" />
-                        {ann.category}
+            {departmentHeadcount.length > 0 ? (
+              <div className="p-5 space-y-3.5">
+                {departmentHeadcount.map((row) => (
+                  <div key={row.department} className="space-y-1.5">
+                    <div className="flex items-center justify-between gap-2 text-xs">
+                      <span className="font-medium text-neutral-800 dark:text-neutral-200 truncate">
+                        {row.department}
                       </span>
-                      <span className="font-mono-tabular">{ann.createdAt.slice(0, 10)}</span>
+                      <span className="font-mono-tabular text-neutral-600 dark:text-neutral-400 shrink-0">
+                        {row.count} ({row.pct}%)
+                      </span>
                     </div>
-                    <h3 className="mt-1.5 text-sm font-semibold text-neutral-900 dark:text-neutral-100">
-                      {ann.title}
-                    </h3>
-                    <p className="mt-1.5 text-xs text-neutral-600 dark:text-neutral-400 leading-relaxed">
-                      {ann.body}
-                    </p>
-                    <div className="mt-3 flex items-center gap-2 text-xs text-neutral-500 dark:text-neutral-400">
-                      <UserAvatar name={author?.fullName ?? 'Admin'} avatarUrl={author?.avatarUrl} size="xs" />
-                      <span>{author?.fullName ?? 'Administrator'}</span>
+                    <div className="h-1.5 w-full rounded-full bg-neutral-100 dark:bg-zinc-800 overflow-hidden">
+                      <div
+                        className="h-full rounded-full bg-sky-600 dark:bg-sky-500 transition-all"
+                        style={{ width: `${Math.max(row.pct, 4)}%` }}
+                      />
                     </div>
-                  </article>
-                );
-              })}
-            </div>
-          ) : (
-            <div className="p-8 text-center space-y-2">
-              <p className="text-sm text-neutral-500 dark:text-neutral-400">
-                No pinned announcements yet.
-              </p>
+                  </div>
+                ))}
+
+                <div className="pt-3 border-t border-neutral-100 dark:border-zinc-800 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-neutral-500 dark:text-neutral-400 tabular-nums">
+                  <span>{activeStaff.length} active</span>
+                  <span>·</span>
+                  <span>{newJoinerCount} new joiners</span>
+                  {inactiveCount > 0 && (
+                    <>
+                      <span>·</span>
+                      <span>{inactiveCount} inactive</span>
+                    </>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <div className="p-6 text-center text-xs text-neutral-500 dark:text-neutral-400">
+                No active staff members yet.
+              </div>
+            )}
+          </section>
+
+          <section className="rounded-xl border border-neutral-200 dark:border-zinc-800 bg-white dark:bg-[#0A0A0C] overflow-hidden">
+            <div className="px-5 py-4 border-b border-neutral-200 dark:border-zinc-800 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <Megaphone className="h-4 w-4 text-amber-500" />
+                <h2 className="text-base font-display font-semibold text-neutral-900 dark:text-neutral-100">
+                  Pinned Announcements
+                </h2>
+              </div>
               {canView('announcements') && (
                 <button
                   type="button"
                   onClick={() => onNavigateModule('announcements')}
-                  className="text-xs font-medium text-sky-600 dark:text-sky-400 hover:underline"
+                  className="text-xs font-medium text-sky-600 dark:text-sky-400 hover:underline whitespace-nowrap"
                 >
-                  Post an announcement →
+                  Manage
                 </button>
               )}
             </div>
-          )}
-        </section>
+
+            {pinnedAnnouncements.length > 0 ? (
+              <div className="divide-y divide-neutral-100 dark:divide-zinc-800/80">
+                {pinnedAnnouncements.map((ann) => {
+                  const author = state.users.find((u) => u.id === ann.authorId);
+                  return (
+                    <article key={ann.id} className="p-5">
+                      <div className="flex items-center justify-between gap-2 text-xs text-neutral-500 dark:text-neutral-400">
+                        <span className="inline-flex items-center gap-1 font-medium text-amber-600 dark:text-amber-400">
+                          <Pin className="h-3 w-3" />
+                          {ann.category}
+                        </span>
+                        <span className="font-mono-tabular">{ann.createdAt.slice(0, 10)}</span>
+                      </div>
+                      <h3 className="mt-1.5 text-sm font-semibold text-neutral-900 dark:text-neutral-100">
+                        {ann.title}
+                      </h3>
+                      <p className="mt-1.5 text-xs text-neutral-600 dark:text-neutral-400 leading-relaxed">
+                        {ann.body}
+                      </p>
+                      <div className="mt-3 flex items-center gap-2 text-xs text-neutral-500 dark:text-neutral-400">
+                        <UserAvatar name={author?.fullName ?? 'Admin'} avatarUrl={author?.avatarUrl} size="xs" />
+                        <span>{author?.fullName ?? 'Administrator'}</span>
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="p-8 text-center space-y-2">
+                <p className="text-sm text-neutral-500 dark:text-neutral-400">
+                  No pinned announcements yet.
+                </p>
+                {canView('announcements') && (
+                  <button
+                    type="button"
+                    onClick={() => onNavigateModule('announcements')}
+                    className="text-xs font-medium text-sky-600 dark:text-sky-400 hover:underline"
+                  >
+                    Post an announcement →
+                  </button>
+                )}
+              </div>
+            )}
+          </section>
+        </div>
       </div>
     </div>
   );
