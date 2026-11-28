@@ -28,6 +28,7 @@ import {
 } from '../types';
 import { getRowField, parseBooleanCell } from '../utils/excel';
 import { canEditModule, canViewModule, getEffectivePermission } from '../utils/rbac';
+import { hasJoinedOverMonths } from '../utils/tenure';
 
 export type CloudSyncStatus = 'connecting' | 'synced' | 'error' | 'offline';
 
@@ -37,17 +38,37 @@ const clone = <T,>(val: T): T => JSON.parse(JSON.stringify(val));
 
 const uid = (prefix: string) => `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
 
+function applyTenuredOnboardingToUser(user: User, onboardingItems: OnboardingChecklistItem[]): User {
+  if (!hasJoinedOverMonths(user.startDate, 3)) return user;
+  const requiredIds = onboardingItems.map((i) => i.id);
+  const completedSet = new Set(user.onboardingCompletedIds);
+  const missingAny = requiredIds.some((id) => !completedSet.has(id));
+  if (!user.isNewJoiner && !missingAny) return user;
+  return {
+    ...user,
+    isNewJoiner: false,
+    onboardingCompletedIds: Array.from(new Set([...user.onboardingCompletedIds, ...requiredIds])),
+  };
+}
+
+function applyTenuredOnboardingToUsers(users: User[], onboardingItems: OnboardingChecklistItem[]): User[] {
+  return users.map((u) => applyTenuredOnboardingToUser(u, onboardingItems));
+}
+
 function buildHydratedState(prev: AppState, incoming: Partial<AppState>): AppState {
   const savedCertBg = incoming.branding?.defaultCertificateBg;
   const upgradedCertBg =
     !savedCertBg || savedCertBg === LEGACY_DEFAULT_CERT_BG ? DEFAULT_CERT_BG : savedCertBg;
-  const nextUsers = incoming.users && incoming.users.length > 0 ? incoming.users : prev.users;
+  const baseSeed = clone(SEED_STATE);
+  const nextOnboardingItems = incoming.onboardingItems ?? prev.onboardingItems ?? baseSeed.onboardingItems;
+  const rawUsers = incoming.users && incoming.users.length > 0 ? incoming.users : prev.users;
+  const nextUsers = applyTenuredOnboardingToUsers(rawUsers, nextOnboardingItems);
   const validCurrentUserId = nextUsers.some((u) => u.id === prev.currentUserId)
     ? prev.currentUserId
     : nextUsers[0]?.id ?? prev.currentUserId;
 
   return {
-    ...clone(SEED_STATE),
+    ...baseSeed,
     ...prev,
     ...incoming,
     branding: {
@@ -56,6 +77,7 @@ function buildHydratedState(prev: AppState, incoming: Partial<AppState>): AppSta
       ...(incoming.branding ?? {}),
       defaultCertificateBg: upgradedCertBg,
     },
+    onboardingItems: nextOnboardingItems,
     users: nextUsers,
     isAuthenticated: prev.isAuthenticated,
     currentUserId: validCurrentUserId,
@@ -105,7 +127,11 @@ function restoreSession(s: AppState): AppState {
 }
 
 function loadInitialState(): AppState {
-  return clone(SEED_STATE);
+  const seeded = clone(SEED_STATE);
+  return {
+    ...seeded,
+    users: applyTenuredOnboardingToUsers(seeded.users, seeded.onboardingItems),
+  };
 }
 
 interface AppContextValue {
@@ -819,13 +845,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Staff (with Auto-Enrollment in LMS courses flagged autoAssignNewJoiners!)
   const createStaff = useCallback(
     (userInput: Omit<User, 'id' | 'onboardingCompletedIds'>) => {
-      const created: User = {
+      const baseCreated: User = {
         ...userInput,
         id: uid('usr'),
         onboardingCompletedIds: [],
       };
+      let autoCompletedCount = 0;
       setState((prev) => {
-        const autoCourses = prev.courses.filter((c) => c.autoAssignNewJoiners);
+        const created = applyTenuredOnboardingToUser(baseCreated, prev.onboardingItems);
+        const autoCourses = created.isNewJoiner
+          ? prev.courses.filter((c) => c.autoAssignNewJoiners)
+          : [];
+        autoCompletedCount = autoCourses.length;
         const now = new Date().toISOString();
         const newEnrollments: Enrollment[] = autoCourses.map((course) => ({
           id: uid('enr'),
@@ -844,9 +875,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           'staff',
           'users',
           created.id,
-          `Created staff profile for ${created.fullName} (auto-enrolled in ${newEnrollments.length} LMS course${
-            newEnrollments.length === 1 ? '' : 's'
-          })`,
+          created.isNewJoiner
+            ? `Created staff profile for ${created.fullName} (auto-enrolled in ${newEnrollments.length} LMS course${
+                newEnrollments.length === 1 ? '' : 's'
+              })`
+            : `Created staff profile for ${created.fullName} (onboarding auto-completed for 3+ months tenure)`,
           null,
           created
         );
@@ -857,7 +890,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           auditLogs: [audit, ...prev.auditLogs],
         };
       });
-      notify(`Added ${userInput.fullName} & auto-enrolled in onboarding courses`);
+      notify(
+        hasJoinedOverMonths(baseCreated.startDate, 3)
+          ? `Added ${userInput.fullName} (onboarding auto-completed for 3+ months tenure)`
+          : `Added ${userInput.fullName} & auto-enrolled in ${autoCompletedCount} onboarding course${autoCompletedCount === 1 ? '' : 's'}`
+      );
     },
     [makeAudit, notify]
   );
@@ -867,7 +904,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setState((prev) => {
         const existing = prev.users.find((u) => u.id === id);
         if (!existing) return prev;
-        const updated = { ...existing, ...patch };
+        const updated = applyTenuredOnboardingToUser({ ...existing, ...patch }, prev.onboardingItems);
         const audit = makeAudit(
           prev,
           'UPDATE',
@@ -996,9 +1033,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           null,
           created
         );
+        const nextOnboardingItems = [...prev.onboardingItems, created];
         return {
           ...prev,
-          onboardingItems: [...prev.onboardingItems, created],
+          onboardingItems: nextOnboardingItems,
+          users: applyTenuredOnboardingToUsers(prev.users, nextOnboardingItems),
           auditLogs: [audit, ...prev.auditLogs],
         };
       });
@@ -2140,17 +2179,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const createdUsers: User[] = pending.map(({ user, managerRef, mentorRef }) => {
           const resolvedManager = managerRef ? byEmail.get(managerRef) ?? byName.get(managerRef) ?? null : null;
           const resolvedMentor = mentorRef ? byEmail.get(mentorRef) ?? byName.get(mentorRef) ?? null : null;
-          return {
-            ...user,
-            managerId: resolvedManager && resolvedManager !== user.id ? resolvedManager : null,
-            mentorId: resolvedMentor && resolvedMentor !== user.id ? resolvedMentor : null,
-          };
+          return applyTenuredOnboardingToUser(
+            {
+              ...user,
+              managerId: resolvedManager && resolvedManager !== user.id ? resolvedManager : null,
+              mentorId: resolvedMentor && resolvedMentor !== user.id ? resolvedMentor : null,
+            },
+            prev.onboardingItems
+          );
         });
 
         const autoCourses = prev.courses.filter((c) => c.autoAssignNewJoiners);
         const now = new Date().toISOString();
         const newEnrollments: Enrollment[] = [];
         for (const u of createdUsers) {
+          if (!u.isNewJoiner) continue;
           for (const course of autoCourses) {
             newEnrollments.push({
               id: uid('enr'),
@@ -2563,9 +2606,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           added
         );
 
+        const nextOnboardingItems = [...prev.onboardingItems, ...added];
         return {
           ...prev,
-          onboardingItems: [...prev.onboardingItems, ...added],
+          onboardingItems: nextOnboardingItems,
+          users: applyTenuredOnboardingToUsers(prev.users, nextOnboardingItems),
           auditLogs: [audit, ...prev.auditLogs],
         };
       });

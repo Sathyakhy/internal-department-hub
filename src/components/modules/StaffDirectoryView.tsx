@@ -4,7 +4,7 @@ import { useAppStore } from '../../store/useAppStore';
 import { PositionHistoryChangeType, PositionHistoryEntry, User } from '../../types';
 import { downloadExcelTemplate } from '../../utils/excel';
 import { sortPositionsByRank, sortUsersByRankAndJoinDate } from '../../utils/orgSort';
-import { formatMonthYear, formatTenure } from '../../utils/tenure';
+import { formatMonthYear, formatTenure, hasJoinedOverMonths } from '../../utils/tenure';
 import { ExcelImportActions } from '../common/ExcelImportActions';
 import { ImageUploadField } from '../common/ImageUploadField';
 import { UserAvatar } from '../common/UserAvatar';
@@ -551,7 +551,14 @@ export const StaffDirectoryView: React.FC = () => {
                   <input
                     type="date"
                     value={form.startDate}
-                    onChange={(e) => setForm({ ...form, startDate: e.target.value })}
+                    onChange={(e) => {
+                      const nextStartDate = e.target.value;
+                      setForm((prev) => ({
+                        ...prev,
+                        startDate: nextStartDate,
+                        isNewJoiner: hasJoinedOverMonths(nextStartDate, 3) ? false : prev.isNewJoiner,
+                      }));
+                    }}
                     className="w-full font-mono-tabular rounded-lg border border-neutral-200 dark:border-zinc-800 bg-white dark:bg-black px-3 py-2 text-sm text-neutral-900 dark:text-neutral-100"
                   />
                 </div>
@@ -620,7 +627,7 @@ export const StaffDirectoryView: React.FC = () => {
                 </div>
               </div>
 
-              <div className="flex flex-wrap gap-6 pt-2">
+              <div className="flex flex-wrap items-center gap-6 pt-2">
                 <label className="inline-flex items-center gap-2 text-xs text-neutral-700 dark:text-neutral-300 cursor-pointer">
                   <input
                     type="checkbox"
@@ -633,12 +640,18 @@ export const StaffDirectoryView: React.FC = () => {
                 <label className="inline-flex items-center gap-2 text-xs text-neutral-700 dark:text-neutral-300 cursor-pointer">
                   <input
                     type="checkbox"
-                    checked={form.isNewJoiner}
+                    checked={hasJoinedOverMonths(form.startDate, 3) ? false : form.isNewJoiner}
+                    disabled={hasJoinedOverMonths(form.startDate, 3)}
                     onChange={(e) => setForm({ ...form, isNewJoiner: e.target.checked })}
-                    className="accent-sky-600"
+                    className="accent-sky-600 disabled:opacity-50"
                   />
                   <span>New Joiner Cohort</span>
                 </label>
+                {hasJoinedOverMonths(form.startDate, 3) && (
+                  <span className="text-[11px] text-emerald-600 dark:text-emerald-400">
+                    Joined 3+ months ago — onboarding auto-completes
+                  </span>
+                )}
               </div>
 
               <div>

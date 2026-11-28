@@ -3,6 +3,7 @@ import { Award, CheckCircle2, Circle, Compass, FolderKanban, Plus, Trash2 } from
 import { useAppStore } from '../../store/useAppStore';
 import { ModuleId } from '../../types';
 import { downloadExcelTemplate } from '../../utils/excel';
+import { hasJoinedOverMonths } from '../../utils/tenure';
 import { ExcelImportActions } from '../common/ExcelImportActions';
 import { UserAvatar } from '../common/UserAvatar';
 import { TaskStatusBadge } from '../common/StatusBadge';
@@ -84,10 +85,16 @@ export const OnboardingHubView: React.FC<OnboardingHubViewProps> = ({
               <h2 className="text-lg font-display font-bold text-neutral-900 dark:text-neutral-100">
                 {targetUser.fullName} — Onboarding Hub
               </h2>
-              {targetUser.isNewJoiner && (
+              {targetUser.isNewJoiner ? (
                 <span className="text-xs font-medium text-sky-600 dark:text-sky-400">
                   · New Joiner Cohort
                 </span>
+              ) : (
+                hasJoinedOverMonths(targetUser.startDate, 3) && (
+                  <span className="text-xs font-medium text-emerald-600 dark:text-emerald-400">
+                    · Auto-completed (3+ months tenure)
+                  </span>
+                )
               )}
             </div>
             <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">

@@ -47,3 +47,17 @@ export function formatMonthYear(dateStr?: string | null): string {
   if (!parsed) return 'Unknown';
   return `${MONTH_NAMES[parsed.getMonth()]} ${parsed.getFullYear()}`;
 }
+
+export function hasJoinedOverMonths(startDate?: string, monthsThreshold = 3): boolean {
+  const start = parseLocalDate(startDate);
+  if (!start) return false;
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const targetMonthIndex = start.getMonth() + monthsThreshold;
+  const targetYear = start.getFullYear() + Math.floor(targetMonthIndex / 12);
+  const targetMonth = targetMonthIndex % 12;
+  const lastDayOfTargetMonth = new Date(targetYear, targetMonth + 1, 0).getDate();
+  const cutoff = new Date(targetYear, targetMonth, Math.min(start.getDate(), lastDayOfTargetMonth));
+  return today >= cutoff;
+}
+
