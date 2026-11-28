@@ -91,6 +91,19 @@ function serializeForCloud(s: AppState): Json {
   } as unknown as Json;
 }
 
+const SESSION_KEY = 'department_os_session_user';
+function readSessionUserId(): string | null {
+  try { return localStorage.getItem(SESSION_KEY); } catch { return null; }
+}
+function writeSessionUserId(id: string | null) {
+  try { id ? localStorage.setItem(SESSION_KEY, id) : localStorage.removeItem(SESSION_KEY); } catch { /* ignore */ }
+}
+function restoreSession(s: AppState): AppState {
+  const id = readSessionUserId();
+  const u = id ? s.users.find((x) => x.id === id && x.isActive) : undefined;
+  return u ? { ...s, isAuthenticated: true, currentUserId: u.id } : s;
+}
+
 function loadInitialState(): AppState {
   return clone(SEED_STATE);
 }
@@ -324,7 +337,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
 
         if (!data || !data.data || Object.keys(data.data as Record<string, unknown>).length === 0) {
-          const seeded = clone(SEED_STATE);
+          const seeded = restoreSession(clone(SEED_STATE));
+          setState(seeded);
           const ok = await persistWorkspaceSnapshot(seeded, { force: true });
           if (cancelled) return;
           if (ok) {
@@ -335,7 +349,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
 
         const remoteData = data.data as Partial<AppState>;
-        const hydrated = buildHydratedState(stateRef.current, remoteData);
+        const hydrated = restoreSession(buildHydratedState(stateRef.current, remoteData));
         lastSavedPayloadRef.current = JSON.stringify(serializeForCloud(hydrated));
         remoteUpdatedAt.current = data.updated_at ?? null;
         pendingSave.current = false;
@@ -587,6 +601,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         isAuthenticated: true,
         currentUserId: matched.id,
       }));
+      writeSessionUserId(matched.id);
       notify(`Signed in as ${matched.fullName}`, 'success');
       return true;
     },
@@ -594,6 +609,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   );
 
   const logout = useCallback(() => {
+    writeSessionUserId(null);
     setState((prev) => ({ ...prev, isAuthenticated: false }));
   }, []);
 
